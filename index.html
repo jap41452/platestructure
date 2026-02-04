@@ -878,18 +878,6 @@ function addPressureArrowsForPatch(f, tBase, p){
     grpFeatures.add(arrow);
   });
 }
-
-
-    // zoom framing
-    const span = (model.shape.type==="rect") ? Math.max(model.shape.W, model.shape.L) : model.shape.D;
-    controls.target.set(0, 0, 0);
-    camera.position.set(span*1.2, span*0.9, span*1.5);
-    controls.update();
-
-    renderFeatureList();
-    resize();
-  }
-
   /***********************
    * Feature list UI
    ***********************/
