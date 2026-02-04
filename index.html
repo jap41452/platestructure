@@ -568,138 +568,317 @@ scene.background = new THREE.Color(0xffffff);
     }
   }
 
-  function buildPlate(){
-    clearGroup(grpPlate);
-    clearGroup(grpEdges);
-    clearGroup(grpFeatures);
+function buildPlate(){
+  clearGroup(grpPlate);
+  clearGroup(grpEdges);
+  clearGroup(grpFeatures);
 
-    // Plate body (simple thin extrusion for now)
-    const t = model.shape.t;
-    const plateMat = new THREE.MeshStandardMaterial({
-      color: 0xdbe6ff,
-      metalness: 0.1,
-      roughness: 0.85,
-      transparent: true,
-      opacity: 0.92
-    });
+  const t = model.shape.t;
 
-    let plateMesh = null;
+  // --- Materials
+  const plateMat = new THREE.MeshStandardMaterial({
+    color: 0xdbe6ff,
+    metalness: 0.05,
+    roughness: 0.9,
+    transparent: true,
+    opacity: 0.92
+  });
 
-    if (model.shape.type === "rect"){
-      const W = model.shape.W;
-      const L = model.shape.L;
+  const cutEdgeMat = new THREE.LineBasicMaterial({ color: 0x111827 });
 
-      const geom = new THREE.BoxGeometry(W, t, L);
-      plateMesh = new THREE.Mesh(geom, plateMat);
-      plateMesh.position.set(0, t/2, 0);
-      grpPlate.add(plateMesh);
+  const patchMat = new THREE.MeshStandardMaterial({
+    color: 0x22c55e,
+    transparent: true,
+    opacity: 0.35,
+    roughness: 0.85
+  });
 
-      // edges: 4 clickable lines
-      // edge ordering: 0=+X, 1=-X, 2=+Z, 3=-Z
+  const patchMatRecess = new THREE.MeshStandardMaterial({
+    color: 0x60a5fa, // blue-ish to distinguish recess
+    transparent: true,
+    opacity: 0.35,
+    roughness: 0.85
+  });
+
+  // --- Build a base Shape with holes (cutouts only)
+  const { shape, outerBoundaryBuilder } = buildBaseShapeAndHoles();
+
+  // --- Extrude into thickness
+  const extrude = new THREE.ExtrudeGeometry(shape, {
+    depth: t,
+    bevelEnabled: false,
+    curveSegments: 96
+  });
+
+  // ExtrudeGeometry extrudes along +Z; rotate so thickness is along +Y
+  extrude.rotateX(-Math.PI / 2); // Z -> Y
+  // After rotate, plate occupies y=[0,t], x/z about the defined shape
+
+  const plateMesh = new THREE.Mesh(extrude, plateMat);
+  plateMesh.position.set(0, 0, 0);
+  grpPlate.add(plateMesh);
+
+  // --- Outer boundary clickable edges
+  outerBoundaryBuilder(t);
+
+  // --- Cutout boundary clickable edges (each cutout creates its own boundary entity)
+  addCutoutBoundaries(t);
+
+  // --- Patches: show thickness delta + pressure arrows
+  addPatchesAndLoads(t, patchMat, patchMatRecess);
+
+  // --- zoom framing
+  const span = (model.shape.type==="rect") ? Math.max(model.shape.W, model.shape.L) : model.shape.D;
+  controls.target.set(0, 0, 0);
+  camera.position.set(span*1.2, span*0.9, span*1.5);
+  controls.update();
+
+  renderFeatureList();
+  resize();
+}
+
+/* -----------------------------
+   Helpers for buildPlate()
+------------------------------*/
+
+function buildBaseShapeAndHoles(){
+  const t = model.shape.t;
+
+  // Shape coordinates live in (x, z) but THREE.Shape uses (x, y).
+  // We'll treat shape.y as "z".
+
+  let base = new THREE.Shape();
+  let outerBoundaryBuilder = null;
+
+  if (model.shape.type === "rect"){
+    const W = model.shape.W;
+    const L = model.shape.L;
+
+    // Rectangle centered at (0,0)
+    base.moveTo(-W/2, -L/2);
+    base.lineTo( W/2, -L/2);
+    base.lineTo( W/2,  L/2);
+    base.lineTo(-W/2,  L/2);
+    base.lineTo(-W/2, -L/2);
+
+    outerBoundaryBuilder = (tTop) => {
+      // 4 clickable outer edges, like before
       const edgeData = [
-        { id:"outer:edge:0", a:[ W/2, t+0.001, -L/2], b:[ W/2, t+0.001,  L/2], label:"Outer edge +X" },
-        { id:"outer:edge:1", a:[-W/2, t+0.001, -L/2], b:[-W/2, t+0.001,  L/2], label:"Outer edge -X" },
-        { id:"outer:edge:2", a:[-W/2, t+0.001,  L/2], b:[ W/2, t+0.001,  L/2], label:"Outer edge +Z" },
-        { id:"outer:edge:3", a:[-W/2, t+0.001, -L/2], b:[ W/2, t+0.001, -L/2], label:"Outer edge -Z" }
+        { id:"outer:edge:0", a:[ W/2, tTop+0.001, -L/2], b:[ W/2, tTop+0.001,  L/2], label:"Outer edge +X" },
+        { id:"outer:edge:1", a:[-W/2, tTop+0.001, -L/2], b:[-W/2, tTop+0.001,  L/2], label:"Outer edge -X" },
+        { id:"outer:edge:2", a:[-W/2, tTop+0.001,  L/2], b:[ W/2, tTop+0.001,  L/2], label:"Outer edge +Z" },
+        { id:"outer:edge:3", a:[-W/2, tTop+0.001, -L/2], b:[ W/2, tTop+0.001, -L/2], label:"Outer edge -Z" }
       ];
+      edgeData.forEach(ed => addBoundaryLine(ed.id, ed.label, ed.a, ed.b));
+    };
 
-      edgeData.forEach(ed => {
-        if (!model.bcs[ed.id]) model.bcs[ed.id] = "free";
-        const geom = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(...ed.a),
-          new THREE.Vector3(...ed.b)
-        ]);
-        const mat = new THREE.LineBasicMaterial({ color: bcColor(model.bcs[ed.id]) });
-        const line = new THREE.Line(geom, mat);
-        line.userData = { pickType:"boundary", boundaryId: ed.id, boundaryLabel: ed.label };
-        grpEdges.add(line);
-      });
-    } else {
-      const D = model.shape.D;
-      const R = D/2;
+  } else {
+    const R = model.shape.D/2;
 
-      // Cylinder as placeholder plate body
-      const geom = new THREE.CylinderGeometry(R, R, t, 96, 1, false);
-      plateMesh = new THREE.Mesh(geom, plateMat);
-      plateMesh.position.set(0, t/2, 0);
-      grpPlate.add(plateMesh);
+    base.absarc(0, 0, R, 0, Math.PI*2, false);
 
-      // outer perimeter line as one clickable boundary (for now)
+    outerBoundaryBuilder = (tTop) => {
       const id = "outer:perimeter";
-      if (!model.bcs[id]) model.bcs[id] = "free";
+      const label = "Outer perimeter";
+      addBoundaryPolylineCircle(id, label, 0, 0, R, tTop+0.001, 160);
+    };
+  }
 
-      const pts = [];
-      const n = 128;
-      for (let i=0;i<=n;i++){
-        const th = (i/n) * Math.PI*2;
-        pts.push(new THREE.Vector3(R*Math.cos(th), t+0.001, R*Math.sin(th)));
-      }
-      const lgeom = new THREE.BufferGeometry().setFromPoints(pts);
-      const lmat = new THREE.LineBasicMaterial({ color: bcColor(model.bcs[id]) });
-      const line = new THREE.Line(lgeom, lmat);
-      line.userData = { pickType:"boundary", boundaryId: id, boundaryLabel:"Outer perimeter" };
-      grpEdges.add(line);
+  // Add holes from CUTOUT features only
+  model.features.forEach(f => {
+    if (f.kind !== "cutout") return;
+
+    const hole = new THREE.Path();
+
+    if (f.shape === "circle"){
+      hole.absarc(f.cx, f.cy, f.r, 0, Math.PI*2, true);
+    } else {
+      const w = f.w, l = f.l;
+      const x0 = f.cx - w/2, x1 = f.cx + w/2;
+      const y0 = f.cy - l/2, y1 = f.cy + l/2;
+
+      hole.moveTo(x0, y0);
+      hole.lineTo(x1, y0);
+      hole.lineTo(x1, y1);
+      hole.lineTo(x0, y1);
+      hole.lineTo(x0, y0);
     }
 
-    // Features (visual-only placeholders)
-    model.features.forEach(f => {
-      if (f.kind === "cutout"){
-        // Represent cutout as a wireframe outline on top surface (no boolean subtraction yet)
-        const mat = new THREE.LineBasicMaterial({ color: 0x111827 });
-        if (f.shape === "circle"){
-          const pts = [];
-          const n = 96;
-          for (let i=0;i<=n;i++){
-            const th = (i/n)*Math.PI*2;
-            pts.push(new THREE.Vector3(
-              f.cx + f.r*Math.cos(th),
-              t + 0.002,
-              f.cy + f.r*Math.sin(th)
-            ));
-          }
-          const g = new THREE.BufferGeometry().setFromPoints(pts);
-          const line = new THREE.Line(g, mat);
-          line.userData = { pickType:"feature", featureId: f.id };
-          grpFeatures.add(line);
-        } else {
-          const w = f.w, l = f.l;
-          const x0 = f.cx - w/2, x1 = f.cx + w/2;
-          const z0 = f.cy - l/2, z1 = f.cy + l/2;
-          const pts = [
-            new THREE.Vector3(x0, t+0.002, z0),
-            new THREE.Vector3(x1, t+0.002, z0),
-            new THREE.Vector3(x1, t+0.002, z1),
-            new THREE.Vector3(x0, t+0.002, z1),
-            new THREE.Vector3(x0, t+0.002, z0),
-          ];
-          const g = new THREE.BufferGeometry().setFromPoints(pts);
-          const line = new THREE.Line(g, mat);
-          line.userData = { pickType:"feature", featureId: f.id };
-          grpFeatures.add(line);
-        }
+    base.holes.push(hole);
+  });
+
+  return { shape: base, outerBoundaryBuilder };
+}
+
+function addBoundaryLine(boundaryId, boundaryLabel, a, b){
+  if (!model.bcs[boundaryId]) model.bcs[boundaryId] = "free";
+
+  const geom = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(...a),
+    new THREE.Vector3(...b)
+  ]);
+
+  const mat = new THREE.LineBasicMaterial({ color: bcColor(model.bcs[boundaryId]) });
+  const line = new THREE.Line(geom, mat);
+  line.userData = { pickType:"boundary", boundaryId, boundaryLabel };
+  grpEdges.add(line);
+}
+
+function addBoundaryPolylineCircle(boundaryId, boundaryLabel, cx, cz, r, y, n=128){
+  if (!model.bcs[boundaryId]) model.bcs[boundaryId] = "free";
+
+  const pts = [];
+  for (let i=0;i<=n;i++){
+    const th = (i/n)*Math.PI*2;
+    pts.push(new THREE.Vector3(
+      cx + r*Math.cos(th),
+      y,
+      cz + r*Math.sin(th)
+    ));
+  }
+  const g = new THREE.BufferGeometry().setFromPoints(pts);
+  const m = new THREE.LineBasicMaterial({ color: bcColor(model.bcs[boundaryId]) });
+  const line = new THREE.Line(g, m);
+  line.userData = { pickType:"boundary", boundaryId, boundaryLabel };
+  grpEdges.add(line);
+}
+
+function addCutoutBoundaries(tTop){
+  model.features.forEach(f => {
+    if (f.kind !== "cutout") return;
+
+    // Each cutout gets its own selectable boundary id
+    // Circle => one perimeter boundary
+    // Rect   => 4 edges (so you can set different BC on each side if desired)
+    if (f.shape === "circle"){
+      const id = `cutout:${f.id}:perimeter`;
+      const label = `Cutout ${f.id} perimeter`;
+      addBoundaryPolylineCircle(id, label, f.cx, f.cy, f.r, tTop+0.001, 128);
+    } else {
+      const w = f.w, l = f.l;
+      const x0 = f.cx - w/2, x1 = f.cx + w/2;
+      const z0 = f.cy - l/2, z1 = f.cy + l/2;
+
+      // edges: +X, -X, +Z, -Z relative to cutout
+      addBoundaryLine(`cutout:${f.id}:edge:0`, `Cutout ${f.id} edge +X`, [x1, tTop+0.001, z0], [x1, tTop+0.001, z1]);
+      addBoundaryLine(`cutout:${f.id}:edge:1`, `Cutout ${f.id} edge -X`, [x0, tTop+0.001, z0], [x0, tTop+0.001, z1]);
+      addBoundaryLine(`cutout:${f.id}:edge:2`, `Cutout ${f.id} edge +Z`, [x0, tTop+0.001, z1], [x1, tTop+0.001, z1]);
+      addBoundaryLine(`cutout:${f.id}:edge:3`, `Cutout ${f.id} edge -Z`, [x0, tTop+0.001, z0], [x1, tTop+0.001, z0]);
+    }
+  });
+}
+
+function addPatchesAndLoads(tBase, patchMat, patchMatRecess){
+  model.features.forEach(f => {
+    if (f.kind !== "patch") return;
+
+    const tO = f.tOverride;
+    const delta = tO - tBase;
+
+    // 1) thickness visualization as raised or recessed "solid"
+    if (Math.abs(delta) > 1e-9){
+      const h = Math.abs(delta);
+      const mat = (delta > 0) ? patchMat : patchMatRecess;
+
+      let geom = null;
+      if (f.shape === "circle"){
+        // thin cylinder "plug"
+        geom = new THREE.CylinderGeometry(f.r, f.r, h, 96, 1, false);
       } else {
-        // patch: draw translucent “cap” region slightly above surface
-        const mat = new THREE.MeshStandardMaterial({
-          color: 0x22c55e,
-          transparent: true,
-          opacity: 0.30,
-          roughness: 0.8
-        });
-        if (f.shape === "circle"){
-          const g = new THREE.CylinderGeometry(f.r, f.r, 0.02, 80);
-          const m = new THREE.Mesh(g, mat);
-          m.position.set(f.cx, t + 0.01, f.cy);
-          m.userData = { pickType:"feature", featureId: f.id };
-          grpFeatures.add(m);
-        } else {
-          const g = new THREE.BoxGeometry(f.w, 0.02, f.l);
-          const m = new THREE.Mesh(g, mat);
-          m.position.set(f.cx, t + 0.01, f.cy);
-          m.userData = { pickType:"feature", featureId: f.id };
-          grpFeatures.add(m);
-        }
+        geom = new THREE.BoxGeometry(f.w, h, f.l);
       }
-    });
+
+      const m = new THREE.Mesh(geom, mat);
+
+      // Base plate occupies y=[0, tBase]. Its top is y=tBase.
+      // For raised: place on top (center at tBase + h/2)
+      // For recessed: place inside (center at tBase - h/2)
+      const yCenter = (delta > 0) ? (tBase + h/2) : (tBase - h/2);
+      m.position.set(f.cx, yCenter, f.cy);
+      m.userData = { pickType:"feature", featureId: f.id };
+      grpFeatures.add(m);
+    } else {
+      // If no thickness change, you can still show a faint patch region
+      // (optional; keep as-is)
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x22c55e,
+        transparent: true,
+        opacity: 0.25,
+        roughness: 0.9
+      });
+      let geom = null;
+      if (f.shape === "circle") geom = new THREE.CylinderGeometry(f.r, f.r, 0.02, 80);
+      else geom = new THREE.BoxGeometry(f.w, 0.02, f.l);
+
+      const m = new THREE.Mesh(geom, mat);
+      m.position.set(f.cx, tBase + 0.01, f.cy);
+      m.userData = { pickType:"feature", featureId: f.id };
+      grpFeatures.add(m);
+    }
+
+    // 2) Pressure arrows (transverse)
+    // Convention: positive pressure acts downward (-Y). Only draw if p != 0.
+    const p = Number(f.pressure ?? 0);
+    if (!isFinite(p) || Math.abs(p) < 1e-12) return;
+
+    addPressureArrowsForPatch(f, tBase, p);
+  });
+}
+
+function addPressureArrowsForPatch(f, tBase, p){
+  // visual scaling for arrow length: make it visible but not huge
+  const span = (model.shape.type==="rect") ? Math.max(model.shape.W, model.shape.L) : model.shape.D;
+  const L = Math.max(0.06*span, 0.6*tBase); // keep visible for thin plates
+  const dir = new THREE.Vector3(0, -1, 0);
+
+  // Arrow color: amber
+  const col = 0xf59e0b;
+
+  // We’ll seed a small grid of arrows across the patch footprint
+  const pts = [];
+
+  if (f.shape === "circle"){
+    const r = f.r;
+    const nR = 3;     // rings
+    const nT = 8;     // angles per ring
+    // center arrow
+    pts.push([f.cx, f.cy]);
+    for (let ir=1; ir<=nR; ir++){
+      const rr = (ir/(nR+0.2))*r*0.9;
+      for (let it=0; it<nT; it++){
+        const th = (it/nT)*Math.PI*2;
+        pts.push([f.cx + rr*Math.cos(th), f.cy + rr*Math.sin(th)]);
+      }
+    }
+  } else {
+    const w = f.w, l = f.l;
+    const nx = 4, nz = 3;
+    for (let ix=0; ix<nx; ix++){
+      const x = f.cx - w/2 + (ix+0.5)*w/nx;
+      for (let iz=0; iz<nz; iz++){
+        const z = f.cy - l/2 + (iz+0.5)*l/nz;
+        pts.push([x, z]);
+      }
+    }
+  }
+
+  // Arrow origin slightly above the top surface so it doesn't z-fight
+  const y0 = tBase + 0.02;
+
+  // Optionally, scale arrowhead size with |p|, but clamp for sanity
+  const mag = Math.min(3.0, Math.max(0.6, Math.log10(1 + Math.abs(p)) + 0.6));
+  const len = L * mag;
+  const headLen = 0.25 * len;
+  const headWid = 0.15 * len;
+
+  pts.forEach(([x, z]) => {
+    const origin = new THREE.Vector3(x, y0, z);
+    const arrow = new THREE.ArrowHelper(dir, origin, len, col, headLen, headWid);
+    arrow.userData = { pickType:"feature", featureId: f.id };
+    grpFeatures.add(arrow);
+  });
+}
+
 
     // zoom framing
     const span = (model.shape.type==="rect") ? Math.max(model.shape.W, model.shape.L) : model.shape.D;
@@ -1076,5 +1255,6 @@ scene.background = new THREE.Color(0xffffff);
 </script>
 </body>
 </html>
+
 
 
