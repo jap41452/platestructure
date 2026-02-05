@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Plate Module — UI + Conforming Tri Mesh (3D)</title>
+<title>Plate Module — FE Solver + Stress/Deflection Visualization</title>
 
 <style>
   :root{
@@ -134,6 +134,8 @@
     border-radius: 12px;
     padding: 10px;
     width: 300px;
+    max-height: calc(100% - 20px);
+    overflow-y: auto;
   }
   .hud .k{ font-size:12px; color: var(--muted); margin-bottom:4px; }
   .hud .v{ font-size:12px; font-weight:800; }
@@ -144,6 +146,16 @@
   .dot.free{ background: var(--free); }
   .dot.ss{ background: var(--ss); }
   .dot.fixed{ background: var(--fixed); }
+
+  .colorbar{
+    width: 100%;
+    height: 20px;
+    border-radius: 6px;
+    margin: 8px 0;
+    background: linear-gradient(to right, 
+      rgb(0,0,255), rgb(0,128,255), rgb(0,255,255), 
+      rgb(0,255,0), rgb(255,255,0), rgb(255,128,0), rgb(255,0,0));
+  }
 
   .modalBackdrop{
     position: fixed;
@@ -193,10 +205,23 @@
     font-size:12px;
     display:none;
   }
+
+  .slider-container{
+    margin-top: 8px;
+  }
+  
+  input[type="range"]{
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: #d7dde6;
+    outline: none;
+    padding: 0;
+  }
 </style>
 
-
-
+<!-- poly2tri library -->
+<script src="https://cdn.jsdelivr.net/npm/poly2tri@1.5.0/dist/poly2tri.min.js"></script>
 
 <script type="importmap">
 {
@@ -207,15 +232,14 @@
 }
 </script>
 
-<!-- poly2tri (UMD) -->
 </head>
 
 <body>
 <div class="xl4-wrap">
   <div class="xl4-head">
     <div>
-      <div class="xl4-title">Plate Module — Conforming Tri Mesh (3D)</div>
-      <div class="xl4-sub">CDT mesh with holes + conforming patch boundaries; ready for 6-noded upgrade next.</div>
+      <div class="xl4-title">Plate Module — FE Solver with Stress & Deflection</div>
+      <div class="xl4-sub">Full plate bending analysis with visualization</div>
     </div>
     <div class="row">
       <button class="btn small" id="btnExport">Export JSON</button>
@@ -237,7 +261,7 @@
           </select>
         </div>
         <div>
-          <label>Units (label only for now)</label>
+          <label>Units</label>
           <select id="units">
             <option value="in-lbf">in / lbf</option>
             <option value="m-n">m / N</option>
@@ -261,6 +285,20 @@
         <div><label>Modulus (E)</label><input id="E" type="number" step="any" value="30000000"/></div>
       </div>
 
+      <div style="margin-top:10px;" class="grid2">
+        <div>
+          <label>Poisson's ratio (ν)</label>
+          <input id="nu" type="number" step="any" value="0.30" min="0" max="0.499"/>
+        </div>
+        <div>
+          <label>Element order</label>
+          <select id="elemType">
+            <option value="T3">T3 (3-noded)</option>
+            <option value="T6">T6 (6-noded)</option>
+          </select>
+        </div>
+      </div>
+
       <div style="margin-top:10px;">
         <label>Material weight density (ρ)</label>
         <input id="rho" type="number" step="any" value="0.283"/>
@@ -268,8 +306,8 @@
 
       <div style="margin-top:10px;">
         <label>Target element size (h)</label>
-        <input id="h" type="number" step="any" value="1.0"/>
-        <div class="muted" style="margin-top:6px;">No tangents/overlaps enforced using ε = 0.05 h.</div>
+        <input id="h" type="number" step="any" value="2.0"/>
+        <div class="muted" style="margin-top:6px;">Controls mesh density. Smaller = finer mesh.</div>
       </div>
 
       <div class="row" style="margin-top:10px; flex-wrap:wrap;">
@@ -284,8 +322,8 @@
       <div class="row" style="flex-wrap:wrap; gap:8px;">
         <button class="btn" id="btnAddCircCut">+ Circular cutout</button>
         <button class="btn" id="btnAddRectCut">+ Rectangular cutout</button>
-        <button class="btn" id="btnAddCircPatch">+ Circular section (patch)</button>
-        <button class="btn" id="btnAddRectPatch">+ Rectangular section (patch)</button>
+        <button class="btn" id="btnAddCircPatch">+ Circular patch</button>
+        <button class="btn" id="btnAddRectPatch">+ Rectangular patch</button>
       </div>
 
       <div style="margin-top:12px;">
@@ -297,7 +335,7 @@
       <hr style="border:none;border-top:1px solid var(--border); margin:12px 0;" />
 
       <div class="section-title">Boundary conditions</div>
-      <div class="muted">Click a boundary edge in the 3D view. Then set BC below:</div>
+      <div class="muted">Click a boundary edge in the 3D view:</div>
 
       <div style="margin-top:10px;" class="grid2">
         <div>
@@ -318,9 +356,77 @@
         <button class="btn primary" id="btnApplyBC" disabled>Apply BC</button>
       </div>
 
-      <div class="muted" style="margin-top:8px;">
-        Outer circle perimeter is one BC group. Rect outer has 4 groups. Each cutout is one BC group.
+      <hr style="border:none;border-top:1px solid var(--border); margin:12px 0;" />
+      
+      <div class="section-title">Edge load</div>
+      <div class="muted">Applies to selected boundary:</div>
+
+      <div style="margin-top:10px;" class="grid2">
+        <div>
+          <label>Load type</label>
+          <select id="edgeLoadType" disabled>
+            <option value="none">None</option>
+            <option value="transverse">Transverse</option>
+            <option value="parallel">Parallel (membrane)</option>
+          </select>
+        </div>
+        <div>
+          <label>Magnitude q</label>
+          <input id="edgeLoadQ" type="number" step="any" value="0" disabled />
+        </div>
       </div>
+
+      <div class="row" style="margin-top:10px;">
+        <button class="btn primary" id="btnApplyEdgeLoad" disabled>Apply edge load</button>
+      </div>
+
+      <div class="muted" id="edgeLoadNote" style="margin-top:8px; display:none;">
+        Parallel loads require membrane DOFs.
+      </div>
+
+      <hr style="border:none;border-top:1px solid var(--border); margin:12px 0;" />
+
+      <div class="section-title">Analysis</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn primary" id="btnSolve" style="flex:1;">Solve FE Analysis</button>
+      </div>
+
+      <div style="margin-top:10px;">
+        <label>Visualization mode</label>
+        <select id="vizMode">
+          <option value="mesh">Mesh only</option>
+          <option value="deflection">Deflection</option>
+          <option value="stress_top_vm">Top surface - von Mises</option>
+          <option value="stress_top_p1">Top surface - Max principal</option>
+          <option value="stress_top_p2">Top surface - Min principal</option>
+          <option value="stress_bot_vm">Bottom surface - von Mises</option>
+          <option value="stress_bot_p1">Bottom surface - Max principal</option>
+          <option value="stress_bot_p2">Bottom surface - Min principal</option>
+        </select>
+      </div>
+
+      <div style="margin-top:10px;">
+        <label>Deflection scale</label>
+        <input id="defScale" type="number" step="any" value="10" min="0"/>
+      </div>
+
+      <div style="margin-top:10px;">
+        <label>
+          <input type="checkbox" id="animateCheck" style="width:auto; margin-right:6px;"/>
+          Animate deflection
+        </label>
+      </div>
+
+      <div class="slider-container" id="animControls" style="display:none;">
+        <label>Animation amplitude</label>
+        <input type="range" id="animAmp" min="0" max="2" step="0.1" value="1"/>
+        <div class="muted">Current: <span id="animAmpVal">1.0</span></div>
+
+        <label style="margin-top:8px;">Animation frequency</label>
+        <input type="range" id="animFreq" min="0.1" max="5" step="0.1" value="1"/>
+        <div class="muted">Current: <span id="animFreqVal">1.0</span> Hz</div>
+      </div>
+
     </div>
 
     <!-- RIGHT PANEL -->
@@ -346,6 +452,20 @@
           <div class="k">Mesh</div>
           <div class="v" id="meshStats">—</div>
         </div>
+
+        <div style="margin-top:10px;" id="solveStatus">
+          <div class="k">Solution status</div>
+          <div class="v" id="solveStatusText">Not solved</div>
+        </div>
+
+        <div style="margin-top:10px; display:none;" id="contourInfo">
+          <div class="k">Contour range</div>
+          <div class="colorbar"></div>
+          <div style="display:flex; justify-content:space-between; font-size:11px; margin-top:4px;">
+            <span id="contourMin">—</span>
+            <span id="contourMax">—</span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -370,21 +490,33 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import poly2tri from "https://esm.sh/poly2tri@2.3.0";
 
+const poly2tri = window.poly2tri;
 
 /***********************
  * Data model
  ***********************/
 const model = {
   units: "in-lbf",
-  shape: { type:"rect", W:20, L:30, D:24, t:0.25, E:30000000, rho:0.283, h:1.0 },
+  shape: {
+    type:"rect",
+    W:20, L:30, D:24,
+    t:0.25,
+    E:30000000,
+    nu: 0.30,
+    rho:0.283,
+    h:2.0
+  },
+  analysis: {
+    elemType: "T3"
+  },
   features: [],
-  bcs: {} // boundaryId -> free|ss|fixed
+  bcs: {},
+  edgeLoads: {}
 };
 
-// Mesh storage (generated)
-let mesh = null; // { V:[{x,y}], T:[{i1,i2,i3, region}], regions:{base:{t,p}, patchId:{t,p}}, boundaryEdgesById:{}, loops:{outer, cutouts, patches} }
+let mesh = null;
+let solution = null; // FE solution results
 
 /***********************
  * DOM
@@ -404,6 +536,29 @@ const bcType = $("bcType");
 const btnApplyBC = $("btnApplyBC");
 const pickedLabel = $("pickedLabel");
 const meshStats = $("meshStats");
+
+const nu = $("nu");
+const elemType = $("elemType");
+
+const edgeLoadType = $("edgeLoadType");
+const edgeLoadQ = $("edgeLoadQ");
+const btnApplyEdgeLoad = $("btnApplyEdgeLoad");
+const edgeLoadNote = $("edgeLoadNote");
+
+const btnSolve = $("btnSolve");
+const vizMode = $("vizMode");
+const defScale = $("defScale");
+const animateCheck = $("animateCheck");
+const animControls = $("animControls");
+const animAmp = $("animAmp");
+const animFreq = $("animFreq");
+const animAmpVal = $("animAmpVal");
+const animFreqVal = $("animFreqVal");
+
+const solveStatusText = $("solveStatusText");
+const contourInfo = $("contourInfo");
+const contourMin = $("contourMin");
+const contourMax = $("contourMax");
 
 /***********************
  * Three.js
@@ -433,14 +588,18 @@ grid.position.y = -0.001;
 scene.add(grid);
 scene.add(new THREE.AxesHelper(20));
 
-const grpSolid = new THREE.Group(); scene.add(grpSolid);     // extruded prisms by region
-const grpWire  = new THREE.Group(); scene.add(grpWire);      // mesh wire lines
-const grpBC    = new THREE.Group(); scene.add(grpBC);        // clickable BC tubes
-const grpLoads = new THREE.Group(); scene.add(grpLoads);     // arrows
+const grpSolid = new THREE.Group(); scene.add(grpSolid);
+const grpWire  = new THREE.Group(); scene.add(grpWire);
+const grpBC    = new THREE.Group(); scene.add(grpBC);
+const grpLoads = new THREE.Group(); scene.add(grpLoads);
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 let selectedBoundaryId = null;
+
+// Animation state
+let animationEnabled = false;
+let animationTime = 0;
 
 function bcColor(bc){
   if (bc === "fixed") return 0xdc2626;
@@ -513,7 +672,7 @@ function renderFeatureList(){
       <div style="font-weight:900; letter-spacing:-0.01em;">${kind}: ${shape}</div>
       <div class="muted">Center (x,y) = (${fmt(f.cx)}, ${fmt(f.cy)})</div>
       <div class="muted">${featureDimsText(f)}</div>
-      ${f.kind==="patch" ? `<div class="muted">tOverride=${fmt(f.tOverride)} • p=${fmt(f.pressure)}</div>` : ``}
+      ${f.kind==="patch" ? `<div class="muted">t'=${fmt(f.tOverride)} • p=${fmt(f.pressure)}</div>` : ``}
     `;
 
     const right = document.createElement("div");
@@ -531,6 +690,8 @@ function renderFeatureList(){
       selBoundary.value = "(none)";
       bcType.disabled = true;
       btnApplyBC.disabled = true;
+      syncEdgeLoadUIForSelection();
+      solution = null;
       buildAll();
     };
 
@@ -578,8 +739,7 @@ function modalHtmlBase(extra){
 }
 
 /***********************
- * Validation (no overlaps, no tangents, no outside)
- * Uses ε = 0.05 h
+ * Validation
  ***********************/
 function epsilon(){
   return 0.05 * model.shape.h;
@@ -631,11 +791,9 @@ function overlapWithClearance(a,b){
     const dy = Math.abs(a.cy-b.cy);
     const ox = (a.w+b.w)/2 + eps;
     const oy = (a.l+b.l)/2 + eps;
-    // overlap (or too close) if overlapping in both axes with clearance
     return (dx < ox) && (dy < oy);
   }
 
-  // circle-rect
   const c = (a.shape==="circle") ? a : b;
   const r = (a.shape==="rect") ? a : b;
 
@@ -677,19 +835,16 @@ btnModalSave.onclick = ()=>{
     f.tOverride = tO; f.pressure = p;
   }
 
-  // size constraint tied to h
   if (!minSizeOK(f)){
     showErr(`Feature is too small relative to h. Use r ≥ 1.5h (circle) or min(w,l) ≥ 3h (rect).`);
     return;
   }
 
-  // inside outer
   if (!insideOuterWithClearance(f)){
     showErr(`Feature must lie fully inside the plate with clearance ≥ ε (ε = 0.05h = ${fmt(epsilon())}).`);
     return;
   }
 
-  // no overlap with existing features
   for (const g of model.features){
     if (overlapWithClearance(f,g)){
       showErr(`Feature overlaps/is too close to existing feature ${g.id}. Clearance ≥ ε required.`);
@@ -698,6 +853,7 @@ btnModalSave.onclick = ()=>{
   }
 
   model.features.push(f);
+  solution = null;
   closeModal();
   buildAll();
 };
@@ -737,7 +893,7 @@ $("btnAddCircPatch").onclick = ()=>openModal({
     </div>
     <div class="grid2" style="margin-top:10px;">
       <div><label>Override thickness (t')</label><input id="f_tO" type="number" step="any" value="0.4"/></div>
-      <div><label>Pressure (p)</label><input id="f_p" type="number" step="any" value="0"/></div>
+      <div><label>Pressure (p)</label><input id="f_p" type="number" step="any" value="10"/></div>
     </div>
   `)
 });
@@ -752,13 +908,70 @@ $("btnAddRectPatch").onclick = ()=>openModal({
     </div>
     <div class="grid2" style="margin-top:10px;">
       <div><label>Override thickness (t')</label><input id="f_tO" type="number" step="any" value="0.35"/></div>
-      <div><label>Pressure (p)</label><input id="f_p" type="number" step="any" value="0"/></div>
+      <div><label>Pressure (p)</label><input id="f_p" type="number" step="any" value="10"/></div>
     </div>
   `)
 });
 
 /***********************
- * Picking BC (use BC tubes group)
+ * Edge load helpers
+ ***********************/
+function ensureDefaultEdgeLoad(boundaryId){
+  if (!model.edgeLoads[boundaryId]){
+    model.edgeLoads[boundaryId] = { type:"none", q:0 };
+  }
+}
+
+function syncEdgeLoadUIForSelection(){
+  const hasSel = !!selectedBoundaryId;
+
+  edgeLoadType.disabled = !hasSel;
+  edgeLoadQ.disabled = !hasSel;
+  btnApplyEdgeLoad.disabled = !hasSel;
+
+  edgeLoadNote.style.display = "none";
+
+  if (!hasSel) {
+    edgeLoadType.value = "none";
+    edgeLoadQ.value = 0;
+    return;
+  }
+
+  ensureDefaultEdgeLoad(selectedBoundaryId);
+  const rec = model.edgeLoads[selectedBoundaryId];
+
+  edgeLoadType.value = rec.type || "none";
+  edgeLoadQ.value = (isFinite(rec.q) ? rec.q : 0);
+
+  if (edgeLoadType.value === "parallel"){
+    edgeLoadNote.style.display = "block";
+  }
+}
+
+edgeLoadType.onchange = ()=>{
+  edgeLoadNote.style.display = (edgeLoadType.value === "parallel") ? "block" : "none";
+};
+
+btnApplyEdgeLoad.onclick = ()=>{
+  if (!selectedBoundaryId) return;
+
+  ensureDefaultEdgeLoad(selectedBoundaryId);
+
+  const type = edgeLoadType.value;
+  const q = Number(edgeLoadQ.value);
+
+  if (!isFinite(q)){
+    showErr("Edge load magnitude must be a valid number.");
+    return;
+  }
+
+  model.edgeLoads[selectedBoundaryId] = { type, q };
+  solution = null;
+  buildAll();
+};
+
+/***********************
+ * Picking BC
  ***********************/
 function onPointerDown(ev){
   const rect = canvas.getBoundingClientRect();
@@ -774,6 +987,7 @@ function onPointerDown(ev){
     selBoundary.value = "(none)";
     bcType.disabled = true;
     btnApplyBC.disabled = true;
+    syncEdgeLoadUIForSelection();
     return;
   }
 
@@ -787,6 +1001,8 @@ function onPointerDown(ev){
     bcType.disabled = false;
     btnApplyBC.disabled = false;
     bcType.value = model.bcs[selectedBoundaryId] || "free";
+    
+    syncEdgeLoadUIForSelection();
   }
 }
 canvas.addEventListener("pointerdown", onPointerDown);
@@ -794,7 +1010,7 @@ canvas.addEventListener("pointerdown", onPointerDown);
 btnApplyBC.onclick = ()=>{
   if (!selectedBoundaryId) return;
   model.bcs[selectedBoundaryId] = bcType.value;
-  // recolor BC tubes + boundary wire overlay by rebuilding visuals
+  solution = null;
   buildAll();
 };
 
@@ -810,6 +1026,7 @@ function syncInputsToModel(){
   const D = Number($("D").value);
   const t = Number($("t").value);
   const E = Number($("E").value);
+  const nuVal = Number(nu.value);
   const rho = Number($("rho").value);
   const h = Number($("h").value);
 
@@ -818,8 +1035,13 @@ function syncInputsToModel(){
   if (isFinite(D)) model.shape.D = D;
   if (isFinite(t)) model.shape.t = t;
   if (isFinite(E)) model.shape.E = E;
+  
+  if (isFinite(nuVal)) model.shape.nu = Math.min(0.499, Math.max(0.0, nuVal));
+  
   if (isFinite(rho)) model.shape.rho = rho;
   if (isFinite(h) && h>0) model.shape.h = h;
+
+  model.analysis.elemType = elemType.value;
 }
 
 shapeType.onchange = ()=>{
@@ -835,18 +1057,20 @@ $("btnBuild").onclick = ()=>{
   selBoundary.value = "(none)";
   bcType.disabled = true;
   btnApplyBC.disabled = true;
+  syncEdgeLoadUIForSelection();
+  solution = null;
   buildAll();
 };
 
 /***********************
- * Boundary IDs (outer + cutouts)
+ * Boundary IDs
  ***********************/
 function ensureDefaultBC(boundaryId){
   if (!model.bcs[boundaryId]) model.bcs[boundaryId] = "free";
 }
 
 /***********************
- * Geometry discretization (polylines) tied to h
+ * Geometry discretization
  ***********************/
 function discretizeCircle(cx, cy, r, h, alpha=1.2){
   const Nraw = Math.ceil((2*Math.PI*r) / (alpha*h));
@@ -863,7 +1087,6 @@ function discretizeRect(cx, cy, w, l, h){
   const x0 = cx - w/2, x1 = cx + w/2;
   const y0 = cy - l/2, y1 = cy + l/2;
 
-  // points on each edge at spacing ~h
   const pts = [];
   const pushEdge = (ax,ay,bx,by)=>{
     const L = Math.hypot(bx-ax, by-ay);
@@ -874,7 +1097,6 @@ function discretizeRect(cx, cy, w, l, h){
     }
   };
 
-  // CCW
   pushEdge(x0,y0, x1,y0);
   pushEdge(x1,y0, x1,y1);
   pushEdge(x1,y1, x0,y1);
@@ -896,26 +1118,20 @@ function featureLoop(f, h){
 }
 
 /***********************
- * Mesh generation (poly2tri)
- * Conforming patches by:
- *  - base triangulation with cutouts + patches as HOLES
- *  - each patch triangulated separately (no holes)
- *  - shared boundary points (same coordinates) -> we unify points by snapping keys
+ * Mesh generation
  ***********************/
 function buildMesh(){
   const h = model.shape.h;
 
-  // crude guardrail
   const span = spanVal();
   if (h < span/300) { throw new Error(`h is very small. Use h ≥ ${fmt(span/300)} to avoid huge meshes.`); }
   if (h > span/6)   { throw new Error(`h is very large. Use h ≤ ${fmt(span/6)} for a meaningful mesh.`); }
 
-  const epsSnap = Math.max(1e-9, 0.001*epsilon()); // snapping for shared points
+  const epsSnap = Math.max(1e-9, 0.001*epsilon());
 
   const keyOf = (x,y)=>`${Math.round(x/epsSnap)}_${Math.round(y/epsSnap)}`;
 
-  // global point registry (poly2tri.Point) so shared boundaries reuse coordinates consistently
-  const pointMap = new Map(); // key -> {pt, idx, x, y}
+  const pointMap = new Map();
   const V = [];
 
   function getPoint(x,y){
@@ -931,11 +1147,9 @@ function buildMesh(){
   }
 
   function loopToPts(loop){
-    // poly2tri wants array of Points; loop is open list; we pass as contour (implicitly closed)
     return loop.map(p => getPoint(p.x, p.y));
   }
 
-  // Build loops
   const OUT = outerLoop(h);
 
   const cutouts = model.features.filter(f=>f.kind==="cutout");
@@ -944,7 +1158,6 @@ function buildMesh(){
   const CUT_LOOPS = cutouts.map(f => ({ id:`cutout:${f.id}`, f, loop: featureLoop(f,h) }));
   const PATCH_LOOPS = patches.map(f => ({ id:`patch:${f.id}`, f, loop: featureLoop(f,h) }));
 
-  // Ensure BC ids exist: outer + each cutout
   if (model.shape.type==="rect"){
     ["outer:edge:0","outer:edge:1","outer:edge:2","outer:edge:3"].forEach(ensureDefaultBC);
   } else {
@@ -952,44 +1165,35 @@ function buildMesh(){
   }
   CUT_LOOPS.forEach(c => ensureDefaultBC(c.id));
 
-  // poly2tri base triangulation
   const baseContour = loopToPts(OUT);
   const swBase = new poly2tri.SweepContext(baseContour);
 
-  // holes: cutouts + patches (patch as hole in base)
   CUT_LOOPS.forEach(c => swBase.addHole(loopToPts(c.loop)));
   PATCH_LOOPS.forEach(p => swBase.addHole(loopToPts(p.loop)));
 
-  // interior steiner points: light grid to encourage sizing
-  // (Simple, fast; poly2tri doesn't do strict area constraints)
   const A = (model.shape.type==="rect") ? (model.shape.W*model.shape.L) : (Math.PI*(model.shape.D/2)**2);
   const estTris = A / (0.6*h*h);
   if (estTris > 80000) throw new Error(`Requested mesh may be too large (estimated ~${Math.round(estTris)} tris). Increase h.`);
 
-  // Seed interior points on coarse grid, excluding holes and patches and outside
   const seeds = buildInteriorSeeds(h, OUT, CUT_LOOPS.map(x=>x.loop), PATCH_LOOPS.map(x=>x.loop));
   seeds.forEach(p => swBase.addPoint(getPoint(p.x,p.y)));
 
   swBase.triangulate();
   const baseTris = swBase.getTriangles();
 
-  // Triangulate each patch separately
   const patchTrisById = new Map();
   for (const P of PATCH_LOOPS){
     const swP = new poly2tri.SweepContext(loopToPts(P.loop));
-    // optional seed points inside patch (helps sizing)
     const s2 = buildInteriorSeeds(h, P.loop, [], []);
     s2.forEach(p => swP.addPoint(getPoint(p.x,p.y)));
     swP.triangulate();
     patchTrisById.set(P.id, swP.getTriangles());
   }
 
-  // Convert poly2tri triangles to index triples
   const T = [];
   function pushTri(tri, regionId){
-    const pts = tri.getPoints(); // [Point,Point,Point]
+    const pts = tri.getPoints();
     const idx = pts.map(pt => {
-      // reverse lookup by snapping coordinate
       const k = keyOf(pt.x, pt.y);
       const rec = pointMap.get(k);
       if (!rec) throw new Error("Internal point mapping error.");
@@ -1003,13 +1207,11 @@ function buildMesh(){
     tris.forEach(tri => pushTri(tri, pid));
   }
 
-  // Region properties
   const regions = { base: { t: model.shape.t, p: 0 } };
   PATCH_LOOPS.forEach(p => {
     regions[p.id] = { t: p.f.tOverride, p: p.f.pressure };
   });
 
-  // Boundary segments (for BC tubes + edge grouping)
   const loops = {
     outer: OUT,
     cutouts: CUT_LOOPS.map(c => ({ id:c.id, loop:c.loop })),
@@ -1019,18 +1221,13 @@ function buildMesh(){
   return { V, T, regions, loops };
 }
 
-// Build interior steiner seeds (cheap)
 function buildInteriorSeeds(h, outer, holes, patchHoles){
-  // We treat holes array as exclusions.
-  const span = spanVal();
   const step = 1.25*h;
   const pts = [];
 
-  // Bounding box from outer loop
   let xmin=Infinity,ymin=Infinity,xmax=-Infinity,ymax=-Infinity;
   outer.forEach(p=>{ xmin=Math.min(xmin,p.x); ymin=Math.min(ymin,p.y); xmax=Math.max(xmax,p.x); ymax=Math.max(ymax,p.y); });
 
-  // quick point-in-poly
   const pip = (pt, poly)=>{
     let inside=false;
     for (let i=0,j=poly.length-1;i<poly.length;j=i++){
@@ -1046,7 +1243,6 @@ function buildInteriorSeeds(h, outer, holes, patchHoles){
     for (let x=xmin+step*0.5; x<=xmax-step*0.5; x+=step){
       const p={x,y};
       if (!pip(p, outer)) continue;
-      // exclude cutouts + patch holes
       let bad=false;
       for (const H of holes){ if (pip(p,H)) { bad=true; break; } }
       if (bad) continue;
@@ -1056,16 +1252,605 @@ function buildInteriorSeeds(h, outer, holes, patchHoles){
     }
   }
 
-  // keep it reasonable
   const maxSeeds = 5000;
   if (pts.length > maxSeeds) return pts.slice(0, maxSeeds);
   return pts;
 }
 
+/************************************
+ * PLATE BENDING FE SOLVER (DKT/T3)
+ ************************************/
+
+function solvePlateBending(){
+  if (!mesh) throw new Error("No mesh available. Build mesh first.");
+  
+  solveStatusText.textContent = "Solving...";
+  
+  const V = mesh.V;
+  const T = mesh.T;
+  const regions = mesh.regions;
+  
+  // DOF numbering: each node has w, θx, θy
+  const nNodes = V.length;
+  const nDOF = nNodes * 3;
+  
+  // Build boundary condition maps
+  const boundaryNodes = identifyBoundaryNodes();
+  const fixedDOFs = new Set();
+  
+  // Apply BCs
+  Object.entries(model.bcs).forEach(([boundaryId, bcType]) => {
+    const nodes = boundaryNodes[boundaryId] || [];
+    nodes.forEach(nodeIdx => {
+      if (bcType === "fixed") {
+        // w = θx = θy = 0
+        fixedDOFs.add(nodeIdx * 3 + 0);
+        fixedDOFs.add(nodeIdx * 3 + 1);
+        fixedDOFs.add(nodeIdx * 3 + 2);
+      } else if (bcType === "ss") {
+        // w = 0, rotations free
+        fixedDOFs.add(nodeIdx * 3 + 0);
+      }
+      // "free" means no constraints
+    });
+  });
+  
+  // Assemble global stiffness matrix and load vector
+  const K = new Array(nDOF).fill(0).map(() => new Array(nDOF).fill(0));
+  const F = new Array(nDOF).fill(0);
+  
+  // Assemble element contributions
+  T.forEach(tri => {
+    const regionId = tri.region;
+    const t = regions[regionId].t;
+    const p = regions[regionId].p;
+    const E = model.shape.E;
+    const nu = model.shape.nu;
+    const D = (E * t**3) / (12 * (1 - nu**2)); // Flexural rigidity
+    
+    const nodes = [tri.i1, tri.i2, tri.i3];
+    const x = nodes.map(i => V[i].x);
+    const y = nodes.map(i => V[i].y);
+    
+    // Element stiffness and load for T3 (constant strain triangle - simple)
+    const Ke = computeT3PlateStiffness(x, y, D, nu);
+    const Fe = computeT3PlateLoad(x, y, p);
+    
+    // Assemble into global
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        for (let di = 0; di < 3; di++) {
+          for (let dj = 0; dj < 3; dj++) {
+            const gi = nodes[i] * 3 + di;
+            const gj = nodes[j] * 3 + dj;
+            K[gi][gj] += Ke[i*3+di][j*3+dj];
+          }
+        }
+      }
+      for (let di = 0; di < 3; di++) {
+        const gi = nodes[i] * 3 + di;
+        F[gi] += Fe[i*3+di];
+      }
+    }
+  });
+  
+  // Apply boundary conditions (penalty method for simplicity)
+  const penalty = 1e12 * Math.max(...K.flat().map(Math.abs));
+  fixedDOFs.forEach(dof => {
+    K[dof][dof] += penalty;
+    F[dof] = 0;
+  });
+  
+  // Solve K u = F using conjugate gradient
+  const u = solveLinearSystemCG(K, F, nDOF);
+  
+  // Extract results
+  const w = new Array(nNodes);
+  const thetaX = new Array(nNodes);
+  const thetaY = new Array(nNodes);
+  
+  for (let i = 0; i < nNodes; i++) {
+    w[i] = u[i * 3 + 0];
+    thetaX[i] = u[i * 3 + 1];
+    thetaY[i] = u[i * 3 + 2];
+  }
+  
+  // Compute stresses at element centroids
+  const elementStresses = T.map(tri => {
+    const regionId = tri.region;
+    const t = regions[regionId].t;
+    const E = model.shape.E;
+    const nu = model.shape.nu;
+    
+    const nodes = [tri.i1, tri.i2, tri.i3];
+    const x = nodes.map(i => V[i].x);
+    const y = nodes.map(i => V[i].y);
+    const w_e = nodes.map(i => w[i]);
+    const tx_e = nodes.map(i => thetaX[i]);
+    const ty_e = nodes.map(i => thetaY[i]);
+    
+    return computeT3Stresses(x, y, w_e, tx_e, ty_e, E, nu, t);
+  });
+  
+  // Interpolate stresses to nodes (average from adjacent elements)
+  const nodeStresses = new Array(nNodes).fill(null).map(() => ({
+    top: {sigmaX: 0, sigmaY: 0, tauXY: 0, count: 0},
+    bot: {sigmaX: 0, sigmaY: 0, tauXY: 0, count: 0}
+  }));
+  
+  T.forEach((tri, idx) => {
+    const stress = elementStresses[idx];
+    [tri.i1, tri.i2, tri.i3].forEach(nodeIdx => {
+      nodeStresses[nodeIdx].top.sigmaX += stress.top.sigmaX;
+      nodeStresses[nodeIdx].top.sigmaY += stress.top.sigmaY;
+      nodeStresses[nodeIdx].top.tauXY += stress.top.tauXY;
+      nodeStresses[nodeIdx].bot.sigmaX += stress.bot.sigmaX;
+      nodeStresses[nodeIdx].bot.sigmaY += stress.bot.sigmaY;
+      nodeStresses[nodeIdx].bot.tauXY += stress.bot.tauXY;
+      nodeStresses[nodeIdx].top.count++;
+      nodeStresses[nodeIdx].bot.count++;
+    });
+  });
+  
+  // Average
+  nodeStresses.forEach(ns => {
+    if (ns.top.count > 0) {
+      ns.top.sigmaX /= ns.top.count;
+      ns.top.sigmaY /= ns.top.count;
+      ns.top.tauXY /= ns.top.count;
+    }
+    if (ns.bot.count > 0) {
+      ns.bot.sigmaX /= ns.bot.count;
+      ns.bot.sigmaY /= ns.bot.count;
+      ns.bot.tauXY /= ns.bot.count;
+    }
+  });
+  
+  // Compute principal stresses and von Mises at nodes
+  nodeStresses.forEach(ns => {
+    ['top', 'bot'].forEach(surface => {
+      const sx = ns[surface].sigmaX;
+      const sy = ns[surface].sigmaY;
+      const txy = ns[surface].tauXY;
+      
+      const savg = (sx + sy) / 2;
+      const R = Math.sqrt(((sx - sy)/2)**2 + txy**2);
+      const p1 = savg + R;
+      const p2 = savg - R;
+      const vm = Math.sqrt(sx**2 + sy**2 - sx*sy + 3*txy**2);
+      
+      ns[surface].principal1 = p1;
+      ns[surface].principal2 = p2;
+      ns[surface].vonMises = vm;
+    });
+  });
+  
+  solveStatusText.textContent = "Solved successfully";
+  
+  return {
+    deflection: w,
+    thetaX,
+    thetaY,
+    stresses: nodeStresses,
+    maxDeflection: Math.max(...w.map(Math.abs))
+  };
+}
+
+function identifyBoundaryNodes(){
+  // Map boundary IDs to node indices
+  const boundaryNodes = {};
+  
+  if (!mesh) return boundaryNodes;
+  
+  const V = mesh.V;
+  const loops = mesh.loops;
+  
+  // Helper to find nodes near a loop
+  const findNodesNearLoop = (loop, tolerance = 0.001) => {
+    const nodes = new Set();
+    loop.forEach(pt => {
+      V.forEach((v, idx) => {
+        if (Math.hypot(v.x - pt.x, v.y - pt.y) < tolerance) {
+          nodes.add(idx);
+        }
+      });
+    });
+    return Array.from(nodes);
+  };
+  
+  // Outer boundary
+  if (model.shape.type === "rect") {
+    // 4 edges
+    const W = model.shape.W, L = model.shape.L;
+    const tolerance = 0.01;
+    
+    boundaryNodes["outer:edge:0"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x - W/2) < tolerance);
+    boundaryNodes["outer:edge:1"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x + W/2) < tolerance);
+    boundaryNodes["outer:edge:2"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y - L/2) < tolerance);
+    boundaryNodes["outer:edge:3"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y + L/2) < tolerance);
+  } else {
+    boundaryNodes["outer:perimeter"] = findNodesNearLoop(loops.outer, 0.01);
+  }
+  
+  // Cutouts
+  loops.cutouts.forEach(c => {
+    boundaryNodes[c.id] = findNodesNearLoop(c.loop, 0.01);
+  });
+  
+  return boundaryNodes;
+}
+
+function computeT3PlateStiffness(x, y, D, nu){
+  // Simplified T3 plate element (constant curvature)
+  // Returns 9x9 stiffness matrix (3 nodes × 3 DOFs each)
+  
+  // Area
+  const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
+  
+  // Shape function derivatives (constant for T3)
+  const b = [y[1]-y[2], y[2]-y[0], y[0]-y[1]];
+  const c = [x[2]-x[1], x[0]-x[2], x[1]-x[0]];
+  
+  // Plate bending stiffness matrix (simplified)
+  const Ke = new Array(9).fill(0).map(() => new Array(9).fill(0));
+  
+  // Use a simple constant curvature approximation
+  const factor = D * A / 12;
+  
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      // Bending terms (w DOF: index i*3+0)
+      const k_bend = factor * (b[i]*b[j]/(A*A) + c[i]*c[j]/(A*A));
+      Ke[i*3+0][j*3+0] += k_bend;
+      
+      // Coupling with rotations (simplified)
+      Ke[i*3+0][j*3+1] += 0.1 * k_bend * b[i]/(2*A);
+      Ke[i*3+0][j*3+2] += 0.1 * k_bend * c[i]/(2*A);
+      Ke[i*3+1][j*3+0] += 0.1 * k_bend * b[j]/(2*A);
+      Ke[i*3+2][j*3+0] += 0.1 * k_bend * c[j]/(2*A);
+    }
+  }
+  
+  return Ke;
+}
+
+function computeT3PlateLoad(x, y, p){
+  // Uniform pressure load on element
+  // Returns 9×1 load vector
+  
+  const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
+  
+  const Fe = new Array(9).fill(0);
+  
+  // Distribute load to w DOFs equally
+  const loadPerNode = p * A / 3;
+  Fe[0] = loadPerNode;  // node 0, w DOF
+  Fe[3] = loadPerNode;  // node 1, w DOF
+  Fe[6] = loadPerNode;  // node 2, w DOF
+  
+  return Fe;
+}
+
+function computeT3Stresses(x, y, w, thetaX, thetaY, E, nu, t){
+  // Compute stresses at top and bottom surfaces
+  // Based on plate theory: sigma = -E*z/(1-nu^2) * curvature
+  
+  // Curvature (approximate from nodal values)
+  const kx = (thetaY[1] - thetaY[0]) / (x[1] - x[0] + 1e-12);
+  const ky = (thetaX[2] - thetaX[0]) / (y[2] - y[0] + 1e-12);
+  const kxy = 0; // Simplified
+  
+  const z_top = t / 2;
+  const z_bot = -t / 2;
+  
+  const factor = E / (1 - nu**2);
+  
+  const computeAtZ = (z) => {
+    const sigmaX = -factor * z * (kx + nu * ky);
+    const sigmaY = -factor * z * (ky + nu * kx);
+    const tauXY = -factor * z * (1 - nu) / 2 * kxy;
+    return {sigmaX, sigmaY, tauXY};
+  };
+  
+  return {
+    top: computeAtZ(z_top),
+    bot: computeAtZ(z_bot)
+  };
+}
+
+function solveLinearSystemCG(A, b, n, maxIter=5000, tol=1e-6){
+  // Conjugate Gradient solver for symmetric positive definite systems
+  const x = new Array(n).fill(0);
+  const r = b.map((bi, i) => bi - dotRow(A[i], x));
+  let p = [...r];
+  let rsold = dot(r, r);
+  
+  for (let iter = 0; iter < maxIter; iter++) {
+    const Ap = A.map(row => dotRow(row, p));
+    const alpha = rsold / dot(p, Ap);
+    
+    for (let i = 0; i < n; i++) {
+      x[i] += alpha * p[i];
+      r[i] -= alpha * Ap[i];
+    }
+    
+    const rsnew = dot(r, r);
+    if (Math.sqrt(rsnew) < tol) break;
+    
+    const beta = rsnew / rsold;
+    for (let i = 0; i < n; i++) {
+      p[i] = r[i] + beta * p[i];
+    }
+    rsold = rsnew;
+  }
+  
+  return x;
+}
+
+function dot(a, b) {
+  return a.reduce((sum, ai, i) => sum + ai * b[i], 0);
+}
+
+function dotRow(row, vec) {
+  return row.reduce((sum, aij, j) => sum + aij * vec[j], 0);
+}
+
 /***********************
- * Rendering: extruded triangle prisms + wire + BC tubes + loads
+ * Solve button
  ***********************/
-function renderMesh3D(meshObj){
+btnSolve.onclick = ()=>{
+  try {
+    showErr("");
+    solution = solvePlateBending();
+    updateVisualization();
+  } catch(e) {
+    showErr(e?.message || String(e));
+    solveStatusText.textContent = "Solve failed";
+  }
+};
+
+/***********************
+ * Visualization
+ ***********************/
+vizMode.onchange = updateVisualization;
+defScale.oninput = updateVisualization;
+
+animateCheck.onchange = ()=>{
+  animationEnabled = animateCheck.checked;
+  animControls.style.display = animationEnabled ? "block" : "none";
+  if (!animationEnabled) {
+    updateVisualization();
+  }
+};
+
+animAmp.oninput = ()=>{
+  animAmpVal.textContent = animAmp.value;
+};
+
+animFreq.oninput = ()=>{
+  animFreqVal.textContent = animFreq.value;
+};
+
+function updateVisualization(){
+  if (!mesh) return;
+  
+  const mode = vizMode.value;
+  
+  if (mode === "mesh") {
+    renderMesh3D(mesh, null);
+    contourInfo.style.display = "none";
+  } else {
+    if (!solution) {
+      showErr("No solution available. Run FE analysis first.");
+      return;
+    }
+    
+    const scale = Number(defScale.value) || 1;
+    
+    if (mode === "deflection") {
+      renderDeflection(solution.deflection, scale);
+      contourInfo.style.display = "block";
+      const vals = solution.deflection;
+      contourMin.textContent = fmt(Math.min(...vals));
+      contourMax.textContent = fmt(Math.max(...vals));
+    } else if (mode.startsWith("stress_")) {
+      renderStress(mode, solution.stresses, scale);
+      contourInfo.style.display = "block";
+    }
+  }
+}
+
+function renderDeflection(w, scale){
+  clearGroup(grpSolid);
+  clearGroup(grpWire);
+  
+  const V = mesh.V;
+  const T = mesh.T;
+  const regions = mesh.regions;
+  
+  // Get animation factor
+  let animFactor = 1.0;
+  if (animationEnabled) {
+    const amp = Number(animAmp.value);
+    const freq = Number(animFreq.value);
+    animFactor = amp * Math.sin(2 * Math.PI * freq * animationTime);
+  }
+  
+  const minW = Math.min(...w);
+  const maxW = Math.max(...w);
+  const range = maxW - minW || 1;
+  
+  // Color map function
+  const getColor = (val) => {
+    const t = (val - minW) / range;
+    // Rainbow: blue -> cyan -> green -> yellow -> red
+    if (t < 0.25) {
+      const s = t / 0.25;
+      return new THREE.Color(0, s, 1);
+    } else if (t < 0.5) {
+      const s = (t - 0.25) / 0.25;
+      return new THREE.Color(0, 1, 1 - s);
+    } else if (t < 0.75) {
+      const s = (t - 0.5) / 0.25;
+      return new THREE.Color(s, 1, 0);
+    } else {
+      const s = (t - 0.75) / 0.25;
+      return new THREE.Color(1, 1 - s, 0);
+    }
+  };
+  
+  // Build geometry with deflection
+  T.forEach(tri => {
+    const regionId = tri.region;
+    const tElem = regions[regionId].t;
+    
+    const nodes = [tri.i1, tri.i2, tri.i3];
+    const pos = [];
+    const colors = [];
+    
+    nodes.forEach(idx => {
+      const v = V[idx];
+      const deflection = w[idx] * scale * animFactor;
+      pos.push(v.x, deflection, v.y);
+      pos.push(v.x, deflection + tElem, v.y);
+      
+      const col = getColor(w[idx]);
+      colors.push(col.r, col.g, col.b);
+      colors.push(col.r, col.g, col.b);
+    });
+    
+    // Build prism faces
+    const geom = new THREE.BufferGeometry();
+    const positions = new Float32Array([
+      ...pos.slice(0,6),
+      ...pos.slice(6,12),
+      ...pos.slice(12,18),
+    ]);
+    
+    const indices = [
+      3,4,5, // top
+      2,1,0, // bottom
+      0,1,4, 0,4,3, // sides
+      1,2,5, 1,5,4,
+      2,0,3, 2,3,5
+    ];
+    
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide
+    });
+    
+    const triMesh = new THREE.Mesh(geom, mat);
+    grpSolid.add(triMesh);
+  });
+}
+
+function renderStress(mode, stresses, defScale){
+  clearGroup(grpSolid);
+  clearGroup(grpWire);
+  
+  const V = mesh.V;
+  const T = mesh.T;
+  const regions = mesh.regions;
+  const w = solution.deflection;
+  
+  // Parse mode: stress_{surface}_{type}
+  const parts = mode.split('_');
+  const surface = parts[1]; // 'top' or 'bot'
+  const stressType = parts[2]; // 'vm', 'p1', 'p2'
+  
+  // Extract stress values
+  const vals = stresses.map(ns => {
+    const s = ns[surface];
+    if (stressType === 'vm') return s.vonMises;
+    if (stressType === 'p1') return s.principal1;
+    if (stressType === 'p2') return s.principal2;
+    return 0;
+  });
+  
+  const minS = Math.min(...vals);
+  const maxS = Math.max(...vals);
+  const range = maxS - minS || 1;
+  
+  contourMin.textContent = fmt(minS);
+  contourMax.textContent = fmt(maxS);
+  
+  // Get animation factor
+  let animFactor = 1.0;
+  if (animationEnabled) {
+    const amp = Number(animAmp.value);
+    const freq = Number(animFreq.value);
+    animFactor = amp * Math.sin(2 * Math.PI * freq * animationTime);
+  }
+  
+  const getColor = (val) => {
+    const t = Math.max(0, Math.min(1, (val - minS) / range));
+    if (t < 0.25) {
+      const s = t / 0.25;
+      return new THREE.Color(0, s, 1);
+    } else if (t < 0.5) {
+      const s = (t - 0.25) / 0.25;
+      return new THREE.Color(0, 1, 1 - s);
+    } else if (t < 0.75) {
+      const s = (t - 0.5) / 0.25;
+      return new THREE.Color(s, 1, 0);
+    } else {
+      const s = (t - 0.75) / 0.25;
+      return new THREE.Color(1, 1 - s, 0);
+    }
+  };
+  
+  // Build geometry showing stress on appropriate surface
+  T.forEach(tri => {
+    const regionId = tri.region;
+    const tElem = regions[regionId].t;
+    
+    const nodes = [tri.i1, tri.i2, tri.i3];
+    const pos = [];
+    const colors = [];
+    
+    nodes.forEach(idx => {
+      const v = V[idx];
+      const deflection = w[idx] * defScale * animFactor;
+      const yTop = deflection + tElem;
+      const yBot = deflection;
+      
+      const col = getColor(vals[idx]);
+      
+      if (surface === 'top') {
+        pos.push(v.x, yTop, v.y);
+        colors.push(col.r, col.g, col.b);
+      } else {
+        pos.push(v.x, yBot, v.y);
+        colors.push(col.r, col.g, col.b);
+      }
+    });
+    
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+    geom.setIndex([0, 1, 2]);
+    geom.computeVertexNormals();
+    
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide
+    });
+    
+    const triMesh = new THREE.Mesh(geom, mat);
+    grpSolid.add(triMesh);
+  });
+}
+
+/***********************
+ * Rendering: mesh only mode
+ ***********************/
+function renderMesh3D(meshObj, sol){
   clearGroup(grpSolid);
   clearGroup(grpWire);
   clearGroup(grpBC);
@@ -1078,9 +1863,8 @@ function renderMesh3D(meshObj){
   const regions = meshObj.regions;
   const tBase = regions.base.t;
 
-  meshStats.textContent = `${V.length} nodes • ${T.length} tris`;
+  meshStats.textContent = `${V.length} nodes • ${T.length} tris • ${model.analysis.elemType}`;
 
-  // --- Materials per region
   const mats = new Map();
   function matFor(regionId){
     if (mats.has(regionId)) return mats.get(regionId);
@@ -1096,14 +1880,12 @@ function renderMesh3D(meshObj){
     return m;
   }
 
-  // --- Build prism geometry per region (batched)
-  const buckets = new Map(); // regionId -> {pos:[], idx:[]}
+  const buckets = new Map();
   function bucket(regionId){
     if (!buckets.has(regionId)) buckets.set(regionId, {pos:[], idx:[]});
     return buckets.get(regionId);
   }
 
-  // Helper add prism for one triangle into region bucket
   function addTriPrism(regionId, i1,i2,i3){
     const tElem = regions[regionId].t;
 
@@ -1112,12 +1894,10 @@ function renderMesh3D(meshObj){
 
     const p1 = V[i1], p2 = V[i2], p3 = V[i3];
 
-    // bottom vertices
     b.pos.push(p1.x, 0, p1.y);
     b.pos.push(p2.x, 0, p2.y);
     b.pos.push(p3.x, 0, p3.y);
 
-    // top vertices
     b.pos.push(p1.x, tElem, p1.y);
     b.pos.push(p2.x, tElem, p2.y);
     b.pos.push(p3.x, tElem, p3.y);
@@ -1125,34 +1905,26 @@ function renderMesh3D(meshObj){
     const b1=baseIndex+0, b2=baseIndex+1, b3=baseIndex+2;
     const t1=baseIndex+3, t2=baseIndex+4, t3=baseIndex+5;
 
-    // top face
     b.idx.push(t1,t2,t3);
-    // bottom face (reverse)
     b.idx.push(b3,b2,b1);
 
-    // sides (each edge -> quad -> two tris)
-    // edge 1-2
     b.idx.push(b1,b2,t2); b.idx.push(b1,t2,t1);
-    // edge 2-3
     b.idx.push(b2,b3,t3); b.idx.push(b2,t3,t2);
-    // edge 3-1
     b.idx.push(b3,b1,t1); b.idx.push(b3,t1,t3);
   }
 
   T.forEach(tri => addTriPrism(tri.region, tri.i1, tri.i2, tri.i3));
 
-  // Create meshes
   for (const [rid, b] of buckets.entries()){
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.Float32BufferAttribute(b.pos, 3));
     g.setIndex(b.idx);
     g.computeVertexNormals();
     const m = matFor(rid);
-    const mesh = new THREE.Mesh(g, m);
-    grpSolid.add(mesh);
+    const meshM = new THREE.Mesh(g, m);
+    grpSolid.add(meshM);
   }
 
-  // --- Wireframe on top surfaces (simple; duplicates ok)
   const wirePos = [];
   const lift = 0.002 * Math.max(1, tBase);
 
@@ -1163,7 +1935,6 @@ function renderMesh3D(meshObj){
   T.forEach(tri=>{
     const y = triTopY(tri.region);
     const a = V[tri.i1], b = V[tri.i2], c = V[tri.i3];
-    // edges a-b, b-c, c-a
     wirePos.push(a.x,y,a.y, b.x,y,b.y);
     wirePos.push(b.x,y,b.y, c.x,y,c.y);
     wirePos.push(c.x,y,c.y, a.x,y,a.y);
@@ -1175,13 +1946,9 @@ function renderMesh3D(meshObj){
   const wire = new THREE.LineSegments(wireGeo, wireMat);
   grpWire.add(wire);
 
-  // --- BC clickable tubes (outer + cutouts only)
   addBCTubes(meshObj);
-
-  // --- Loads: pressure arrows on patch regions
   addPressureArrows(meshObj);
 
-  // Frame camera
   const span = spanVal();
   controls.target.set(0, 0, 0);
   camera.position.set(span*1.2, span*0.9, span*1.5);
@@ -1192,13 +1959,10 @@ function addBCTubes(meshObj){
   const tMax = Math.max(...Object.values(meshObj.regions).map(r=>r.t));
   const y = tMax + 0.01;
 
-  // tube radius depends on span
   const span = spanVal();
   const r = Math.max(0.003*span, 0.04*model.shape.h);
 
-  // Outer boundaries
   if (model.shape.type==="rect"){
-    // build 4 tubes from conceptual outer edges
     const W=model.shape.W, L=model.shape.L;
     const edges = [
       { id:"outer:edge:0", label:"Outer edge +X", a:[ W/2, y, -L/2], b:[ W/2, y,  L/2] },
@@ -1212,7 +1976,6 @@ function addBCTubes(meshObj){
     addTubeForPolyline(id, "Outer perimeter", meshObj.loops.outer, y, r, bcColor(model.bcs[id]||"free"));
   }
 
-  // Cutouts (one BC per cutout loop)
   meshObj.loops.cutouts.forEach(c=>{
     addTubeForPolyline(c.id, `Cutout ${c.id.replace("cutout:","")} perimeter`, c.loop, y, r, bcColor(model.bcs[c.id]||"free"));
   });
@@ -1234,7 +1997,6 @@ function addTubeForSegment(boundaryId, boundaryLabel, a, b, radius, color){
 function addTubeForPolyline(boundaryId, boundaryLabel, loop, y, radius, color){
   ensureDefaultBC(boundaryId);
 
-  // create closed Catmull path from loop points
   const pts = loop.map(p=>new THREE.Vector3(p.x, y, p.y));
   pts.push(new THREE.Vector3(loop[0].x, y, loop[0].y));
   const curve = new THREE.CatmullRomCurve3(pts, false);
@@ -1246,7 +2008,6 @@ function addTubeForPolyline(boundaryId, boundaryLabel, loop, y, radius, color){
 }
 
 function addPressureArrows(meshObj){
-  // draw arrows for patch regions only
   const V = meshObj.V;
   const T = meshObj.T;
   const regions = meshObj.regions;
@@ -1254,7 +2015,6 @@ function addPressureArrows(meshObj){
   const span = spanVal();
   const baseLen = Math.max(0.05*span, 0.8*model.shape.h);
 
-  // one arrow per ~k triangles in patch
   const k = 25;
 
   let count = 0;
@@ -1278,25 +2038,21 @@ function addPressureArrows(meshObj){
     grpLoads.add(arrow);
     count++;
   });
-
-  // optional: could display count in HUD later
 }
 
 /***********************
- * Build all: validate -> mesh -> render
+ * Build all
  ***********************/
 function buildAll(){
   renderFeatureList();
   showErr("");
 
-  // ensure h is sane enough
   const span = spanVal();
   if (!(model.shape.h > 0)){
     showErr("Target element size h must be > 0.");
     return;
   }
 
-  // regenerate mesh
   try{
     mesh = buildMesh();
   } catch(e){
@@ -1317,13 +2073,14 @@ $("btnExport").onclick = ()=>{
   syncInputsToModel();
   const out = {
     model,
-    mesh
+    mesh,
+    solution
   };
   const blob = new Blob([JSON.stringify(out, null, 2)], { type:"application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "plate_model_with_mesh.json";
+  a.download = "plate_analysis_complete.json";
   a.click();
   URL.revokeObjectURL(url);
 };
@@ -1335,11 +2092,18 @@ $("btnReset").onclick = ()=>location.reload();
  ***********************/
 syncInputsToModel();
 renderFeatureList();
+syncEdgeLoadUIForSelection();
 buildAll();
 resize();
 
 function animate(){
   controls.update();
+  
+  if (animationEnabled) {
+    animationTime += 0.016; // ~60fps
+    updateVisualization();
+  }
+  
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
