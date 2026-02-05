@@ -1368,6 +1368,13 @@ function solvePlateBending(){
     // For cutouts: no pressure, no self-weight
     
     const Ke = computeT3PlateStiffness(x, y, D, nu);
+    
+    // Validate element stiffness
+    if (Ke.some(row => row.some(v => !isFinite(v)))) {
+      console.error("Element stiffness contains NaN/Inf:", {tri, x, y, D, nu, A});
+      throw new Error("Invalid element stiffness matrix");
+    }
+    
     const Fe = computeT3PlateLoad(x, y, pTotal);
     
     for (let i = 0; i < 3; i++) {
@@ -1396,6 +1403,18 @@ function solvePlateBending(){
   
   // Solve
   const u = solveLinearSystemCG(K, F, nDOF);
+  
+  // Check for NaN values
+  const nanCount = u.filter(v => !isFinite(v)).length;
+  if (nanCount > 0) {
+    console.error(`Solution contains ${nanCount} NaN/Inf values out of ${nDOF}`);
+    console.error("Sample K diagonal:", K.map((row, i) => row[i]).slice(0, 10));
+    console.error("Sample F:", F.slice(0, 10));
+    console.error("Sample u:", u.slice(0, 10));
+    throw new Error(`Solver produced NaN values. Check stiffness matrix and loading.`);
+  }
+  
+  console.log(`Solution complete. Max displacement: ${Math.max(...u.map(Math.abs)).toExponential(3)}`);
   
   const w = new Array(nNodes);
   const thetaX = new Array(nNodes);
