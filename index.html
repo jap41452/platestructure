@@ -1334,6 +1334,7 @@ function solvePlateBending(){
   const F = new Array(nDOF).fill(0);
   
   // Assemble element contributions
+  let elemCount = 0;
   T.forEach(tri => {
     const regionId = tri.region;
     const t = regions[regionId].t;
@@ -1369,6 +1370,17 @@ function solvePlateBending(){
     
     const Ke = computeT3PlateStiffness(x, y, D, nu);
     
+    // Debug first element
+    if (elemCount === 0) {
+      console.log("=== FIRST ELEMENT DEBUG ===");
+      console.log("Nodes:", nodes);
+      console.log("Coordinates x:", x, "y:", y);
+      console.log("Area:", A, "D:", D, "E:", E, "t:", t, "nu:", nu);
+      console.log("Ke[0]:", Ke[0]);
+      console.log("Ke[4]:", Ke[4]);
+      console.log("pTotal:", pTotal);
+    }
+    
     // Validate element stiffness
     if (Ke.some(row => row.some(v => !isFinite(v)))) {
       console.error("Element stiffness contains NaN/Inf:", {tri, x, y, D, nu, A});
@@ -1376,6 +1388,8 @@ function solvePlateBending(){
     }
     
     const Fe = computeT3PlateLoad(x, y, pTotal);
+    
+    elemCount++;
     
     for (let i = 0; i < 3; i++) {
       for (let j = 0; j < 3; j++) {
