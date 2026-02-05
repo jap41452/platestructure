@@ -1182,7 +1182,10 @@ function buildMesh(){
 
   const A = (model.shape.type==="rect") ? (model.shape.W*model.shape.L) : (Math.PI*(model.shape.D/2)**2);
   const estTris = A / (0.6*h*h);
+  console.log(`Estimated triangles: ~${Math.round(estTris)}`);
+  
   if (estTris > 80000) throw new Error(`Requested mesh may be too large (estimated ~${Math.round(estTris)} tris). Increase h.`);
+  if (estTris > 10000) console.warn(`Large mesh detected (~${Math.round(estTris)} tris). May be slow. Consider h > ${fmt(Math.sqrt(A/10000))}`);
 
   const seeds = buildInteriorSeeds(h, OUT, CUT_LOOPS.map(x=>x.loop), PATCH_LOOPS.map(x=>x.loop));
   seeds.forEach(p => swBase.addPoint(getPoint(p.x,p.y)));
@@ -1231,7 +1234,8 @@ function buildMesh(){
 }
 
 function buildInteriorSeeds(h, outer, holes, patchHoles){
-  const step = 1.25*h;
+  // More conservative seeding to avoid stack overflow
+  const step = 2.0*h;  // Increased from 1.25*h
   const pts = [];
 
   let xmin=Infinity,ymin=Infinity,xmax=-Infinity,ymax=-Infinity;
@@ -1261,8 +1265,14 @@ function buildInteriorSeeds(h, outer, holes, patchHoles){
     }
   }
 
-  const maxSeeds = 5000;
-  if (pts.length > maxSeeds) return pts.slice(0, maxSeeds);
+  // More aggressive limit to prevent stack overflow
+  const maxSeeds = 1500;  // Reduced from 5000
+  if (pts.length > maxSeeds) {
+    console.warn(`Too many seed points (${pts.length}). Limiting to ${maxSeeds}. Consider increasing h.`);
+    return pts.slice(0, maxSeeds);
+  }
+  
+  console.log(`Generated ${pts.length} interior seed points`);
   return pts;
 }
 
@@ -1485,9 +1495,11 @@ function identifyBoundaryNodes(){
   const V = mesh.V;
   const loops = mesh.loops;
   
-  // Use adaptive tolerance based on element size
+  // Use much more generous tolerance - needs to capture boundary nodes reliably
   const h = model.shape.h;
-  const tolerance = Math.max(0.1 * h, 0.1); // At least 0.1, or 10% of element size
+  const tolerance = Math.max(0.5 * h, 0.5); // 50% of element size, minimum 0.5
+  
+  console.log(`Boundary identification with tolerance: ${tolerance}`);
   
   const findNodesNearLoop = (loop, tol) => {
     const nodes = new Set();
@@ -1504,52 +1516,110 @@ function identifyBoundaryNodes(){
   if (model.shape.type === "rect") {
     const W = model.shape.W, L = model.shape.L;
     
+    // Find nodes near each edge with generous tolerance
     boundaryNodes["outer:edge:0"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x - W/2) < tolerance);
     boundaryNodes["outer:edge:1"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x + W/2) < tolerance);
     boundaryNodes["outer:edge:2"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y - L/2) < tolerance);
     boundaryNodes["outer:edge:3"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y + L/2) < tolerance);
     
-    // Debug logging
-    console.log("Boundary identification:");
-    console.log("  Tolerance:", tolerance);
-    console.log("  Edge 0 (+X) nodes:", boundaryNodes["outer:edge:0"].length);
-    console.log("  Edge 1 (-X) nodes:", boundaryNodes["outer:edge:1"].length);
-    console.log("  Edge 2 (+Y) nodes:", boundaryNodes["outer:edge:2"].length);
-    console.log("  Edge 3 (-Y) nodes:", boundaryNodes["outer:edge:3"].length);
+    console.log("Rectangular boundary nodes:");
+    console.log(`  Edge 0 (+X at x=${W/2}): ${boundaryNodes["outer:edge:0"].length} nodes`);
+    console.log(`  Edge 1 (-X at x=${-W/2}): ${boundaryNodes["outer:edge:1"].length} nodes`);
+    console.log(`  Edge 2 (+Y at y=${L/2}): ${boundaryNodes["outer:edge:2"].length} nodes`);
+    console.log(`  Edge 3 (-Y at y=${-L/2}): ${boundaryNodes["outer:edge:3"].length} nodes`);
+    
+    // Debug: show actual node coordinates on edges
+    if (boundaryNodes["outer:edge:0"].length > 0) {
+      const sample = boundaryNodes["outer:edge:0"].slice(0, 3);
+      console.log(`  Sample Edge 0 coords:`, sample.map(i => `(${V[i].x.toFixed(2)}, ${V[i].y.toFixed(2)})`));
+    }
   } else {
     boundaryNodes["outer:perimeter"] = findNodesNearLoop(loops.outer, tolerance);
-    console.log("Boundary identification:");
-    console.log("  Tolerance:", tolerance);
-    console.log("  Perimeter nodes:", boundaryNodes["outer:perimeter"].length);
+    console.log("Circular boundary nodes:");
+    console.log(`  Perimeter: ${boundaryNodes["outer:perimeter"].length} nodes`);
   }
   
   loops.cutouts.forEach(c => {
     boundaryNodes[c.id] = findNodesNearLoop(c.loop, tolerance);
-    console.log(`  ${c.id} nodes:`, boundaryNodes[c.id].length);
+    console.log(`  ${c.id}: ${boundaryNodes[c.id].length} nodes`);
   });
   
   return boundaryNodes;
 }
 
 function computeT3PlateStiffness(x, y, D, nu){
-  const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
+  // Improved T3 plate element based on constant curvature assumption
+  // Uses proper shape function derivatives
   
-  const b = [y[1]-y[2], y[2]-y[0], y[0]-y[1]];
-  const c = [x[2]-x[1], x[0]-x[2], x[1]-x[0]];
+  const x21 = x[1] - x[0], x32 = x[2] - x[1], x13 = x[0] - x[2];
+  const y12 = y[0] - y[1], y23 = y[1] - y[2], y31 = y[2] - y[0];
   
+  const A = 0.5 * Math.abs(x21 * y31 - x13 * y12);
+  
+  if (A < 1e-12) {
+    console.warn("Degenerate triangle detected");
+    return new Array(9).fill(0).map(() => new Array(9).fill(0));
+  }
+  
+  // Shape function derivatives
+  const b = [y23, y31, y12];
+  const c = [x32, x13, x21];
+  
+  // Curvature matrix B [3 x 9]
+  // kx = -d²w/dx², ky = -d²w/dy², kxy = -2*d²w/dxdy
+  const B = [];
+  for (let i = 0; i < 3; i++) {
+    // For node i: [w, θx, θy]
+    // kx (curvature in x)
+    B.push([0, 0, b[i]/(2*A)]);
+    // ky (curvature in y)  
+    B.push([0, -c[i]/(2*A), 0]);
+    // kxy (twist)
+    B.push([0, -b[i]/(2*A), -c[i]/(2*A)]);
+  }
+  
+  // Flatten B matrix properly: B[row][col] where row = curvature component, col = DOF
+  const Bmat = new Array(3).fill(0).map(() => new Array(9).fill(0));
+  for (let node = 0; node < 3; node++) {
+    // kx row
+    Bmat[0][node*3 + 2] = b[node]/(2*A);
+    // ky row
+    Bmat[1][node*3 + 1] = -c[node]/(2*A);
+    // kxy row
+    Bmat[2][node*3 + 1] = -b[node]/(2*A);
+    Bmat[2][node*3 + 2] = -c[node]/(2*A);
+  }
+  
+  // Material matrix D_mat [3 x 3]
+  const D_mat = [
+    [1, nu, 0],
+    [nu, 1, 0],
+    [0, 0, (1-nu)/2]
+  ];
+  
+  // K = D * A * B^T * D_mat * B
   const Ke = new Array(9).fill(0).map(() => new Array(9).fill(0));
   
-  const factor = D * A / 12;
-  
-  for (let i = 0; i < 3; i++) {
+  // Compute B^T * D_mat
+  const BTD = new Array(9).fill(0).map(() => new Array(3).fill(0));
+  for (let i = 0; i < 9; i++) {
     for (let j = 0; j < 3; j++) {
-      const k_bend = factor * (b[i]*b[j]/(A*A) + c[i]*c[j]/(A*A));
-      Ke[i*3+0][j*3+0] += k_bend;
-      
-      Ke[i*3+0][j*3+1] += 0.1 * k_bend * b[i]/(2*A);
-      Ke[i*3+0][j*3+2] += 0.1 * k_bend * c[i]/(2*A);
-      Ke[i*3+1][j*3+0] += 0.1 * k_bend * b[j]/(2*A);
-      Ke[i*3+2][j*3+0] += 0.1 * k_bend * c[j]/(2*A);
+      let sum = 0;
+      for (let k = 0; k < 3; k++) {
+        sum += Bmat[k][i] * D_mat[k][j];
+      }
+      BTD[i][j] = sum;
+    }
+  }
+  
+  // Compute (B^T * D_mat) * B
+  for (let i = 0; i < 9; i++) {
+    for (let j = 0; j < 9; j++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) {
+        sum += BTD[i][k] * Bmat[k][j];
+      }
+      Ke[i][j] = D * A * sum;
     }
   }
   
