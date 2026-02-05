@@ -1299,11 +1299,10 @@ function solvePlateBending(){
   const nNodes = V.length;
   const nDOF = nNodes * 3;
   
-  const boundaryNodes = identifyBoundaryNodes();
-  const fixedDOFs = new Set();
-  
+  // Apply BCs
   Object.entries(model.bcs).forEach(([boundaryId, bcType]) => {
     const nodes = boundaryNodes[boundaryId] || [];
+    console.log(`Applying BC "${bcType}" to boundary "${boundaryId}": ${nodes.length} nodes`);
     nodes.forEach(nodeIdx => {
       if (bcType === "fixed") {
         fixedDOFs.add(nodeIdx * 3 + 0);
@@ -1314,6 +1313,8 @@ function solvePlateBending(){
       }
     });
   });
+  
+  console.log(`Total fixed DOFs: ${fixedDOFs.size} out of ${nDOF}`);
   
   const K = new Array(nDOF).fill(0).map(() => new Array(nDOF).fill(0));
   const F = new Array(nDOF).fill(0);
@@ -1480,11 +1481,15 @@ function identifyBoundaryNodes(){
   const V = mesh.V;
   const loops = mesh.loops;
   
-  const findNodesNearLoop = (loop, tolerance = 0.01) => {
+  // Use adaptive tolerance based on element size
+  const h = model.shape.h;
+  const tolerance = Math.max(0.1 * h, 0.1); // At least 0.1, or 10% of element size
+  
+  const findNodesNearLoop = (loop, tol) => {
     const nodes = new Set();
     loop.forEach(pt => {
       V.forEach((v, idx) => {
-        if (Math.hypot(v.x - pt.x, v.y - pt.y) < tolerance) {
+        if (Math.hypot(v.x - pt.x, v.y - pt.y) < tol) {
           nodes.add(idx);
         }
       });
@@ -1494,18 +1499,29 @@ function identifyBoundaryNodes(){
   
   if (model.shape.type === "rect") {
     const W = model.shape.W, L = model.shape.L;
-    const tolerance = 0.01;
     
     boundaryNodes["outer:edge:0"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x - W/2) < tolerance);
     boundaryNodes["outer:edge:1"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].x + W/2) < tolerance);
     boundaryNodes["outer:edge:2"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y - L/2) < tolerance);
     boundaryNodes["outer:edge:3"] = V.map((v,i)=>i).filter(i => Math.abs(V[i].y + L/2) < tolerance);
+    
+    // Debug logging
+    console.log("Boundary identification:");
+    console.log("  Tolerance:", tolerance);
+    console.log("  Edge 0 (+X) nodes:", boundaryNodes["outer:edge:0"].length);
+    console.log("  Edge 1 (-X) nodes:", boundaryNodes["outer:edge:1"].length);
+    console.log("  Edge 2 (+Y) nodes:", boundaryNodes["outer:edge:2"].length);
+    console.log("  Edge 3 (-Y) nodes:", boundaryNodes["outer:edge:3"].length);
   } else {
-    boundaryNodes["outer:perimeter"] = findNodesNearLoop(loops.outer, 0.01);
+    boundaryNodes["outer:perimeter"] = findNodesNearLoop(loops.outer, tolerance);
+    console.log("Boundary identification:");
+    console.log("  Tolerance:", tolerance);
+    console.log("  Perimeter nodes:", boundaryNodes["outer:perimeter"].length);
   }
   
   loops.cutouts.forEach(c => {
-    boundaryNodes[c.id] = findNodesNearLoop(c.loop, 0.01);
+    boundaryNodes[c.id] = findNodesNearLoop(c.loop, tolerance);
+    console.log(`  ${c.id} nodes:`, boundaryNodes[c.id].length);
   });
   
   return boundaryNodes;
