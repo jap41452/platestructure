@@ -299,9 +299,15 @@
         </div>
       </div>
 
-      <div style="margin-top:10px;">
-        <label>Material weight density (ρ)</label>
-        <input id="rho" type="number" step="any" value="0.283"/>
+      <div style="margin-top:10px;" class="grid2">
+        <div>
+          <label>Material weight density (ρ)</label>
+          <input id="rho" type="number" step="any" value="0.283"/>
+        </div>
+        <div>
+          <label>Overall pressure load</label>
+          <input id="globalPressure" type="number" step="any" value="0"/>
+        </div>
       </div>
 
       <div style="margin-top:10px;">
@@ -505,6 +511,7 @@ const model = {
     E:30000000,
     nu: 0.30,
     rho:0.283,
+    globalPressure: 0,  // NEW
     h:2.0
   },
   analysis: {
@@ -516,7 +523,7 @@ const model = {
 };
 
 let mesh = null;
-let solution = null; // FE solution results
+let solution = null;
 
 /***********************
  * DOM
@@ -539,6 +546,7 @@ const meshStats = $("meshStats");
 
 const nu = $("nu");
 const elemType = $("elemType");
+const globalPressure = $("globalPressure");  // NEW
 
 const edgeLoadType = $("edgeLoadType");
 const edgeLoadQ = $("edgeLoadQ");
@@ -597,7 +605,6 @@ const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 let selectedBoundaryId = null;
 
-// Animation state
 let animationEnabled = false;
 let animationTime = 0;
 
@@ -1028,6 +1035,7 @@ function syncInputsToModel(){
   const E = Number($("E").value);
   const nuVal = Number(nu.value);
   const rho = Number($("rho").value);
+  const gp = Number(globalPressure.value);  // NEW
   const h = Number($("h").value);
 
   if (isFinite(W)) model.shape.W = W;
@@ -1039,6 +1047,7 @@ function syncInputsToModel(){
   if (isFinite(nuVal)) model.shape.nu = Math.min(0.499, Math.max(0.0, nuVal));
   
   if (isFinite(rho)) model.shape.rho = rho;
+  if (isFinite(gp)) model.shape.globalPressure = gp;  // NEW
   if (isFinite(h) && h>0) model.shape.h = h;
 
   model.analysis.elemType = elemType.value;
@@ -1258,6 +1267,23 @@ function buildInteriorSeeds(h, outer, holes, patchHoles){
 }
 
 /************************************
+ * Helper: check if point is in cutout
+ ************************************/
+function isPointInCutout(x, y){
+  const cutouts = model.features.filter(f=>f.kind==="cutout");
+  for (const cut of cutouts){
+    if (cut.shape === "circle"){
+      if (Math.hypot(x - cut.cx, y - cut.cy) <= cut.r) return true;
+    } else {
+      const dx = Math.abs(x - cut.cx);
+      const dy = Math.abs(y - cut.cy);
+      if (dx <= cut.w/2 && dy <= cut.l/2) return true;
+    }
+  }
+  return false;
+}
+
+/************************************
  * PLATE BENDING FE SOLVER (DKT/T3)
  ************************************/
 
@@ -1270,32 +1296,25 @@ function solvePlateBending(){
   const T = mesh.T;
   const regions = mesh.regions;
   
-  // DOF numbering: each node has w, θx, θy
   const nNodes = V.length;
   const nDOF = nNodes * 3;
   
-  // Build boundary condition maps
   const boundaryNodes = identifyBoundaryNodes();
   const fixedDOFs = new Set();
   
-  // Apply BCs
   Object.entries(model.bcs).forEach(([boundaryId, bcType]) => {
     const nodes = boundaryNodes[boundaryId] || [];
     nodes.forEach(nodeIdx => {
       if (bcType === "fixed") {
-        // w = θx = θy = 0
         fixedDOFs.add(nodeIdx * 3 + 0);
         fixedDOFs.add(nodeIdx * 3 + 1);
         fixedDOFs.add(nodeIdx * 3 + 2);
       } else if (bcType === "ss") {
-        // w = 0, rotations free
         fixedDOFs.add(nodeIdx * 3 + 0);
       }
-      // "free" means no constraints
     });
   });
   
-  // Assemble global stiffness matrix and load vector
   const K = new Array(nDOF).fill(0).map(() => new Array(nDOF).fill(0));
   const F = new Array(nDOF).fill(0);
   
@@ -1303,20 +1322,39 @@ function solvePlateBending(){
   T.forEach(tri => {
     const regionId = tri.region;
     const t = regions[regionId].t;
-    const p = regions[regionId].p;
+    const pPatch = regions[regionId].p;  // patch pressure
     const E = model.shape.E;
     const nu = model.shape.nu;
-    const D = (E * t**3) / (12 * (1 - nu**2)); // Flexural rigidity
+    const D = (E * t**3) / (12 * (1 - nu**2));
     
     const nodes = [tri.i1, tri.i2, tri.i3];
     const x = nodes.map(i => V[i].x);
     const y = nodes.map(i => V[i].y);
     
-    // Element stiffness and load for T3 (constant strain triangle - simple)
-    const Ke = computeT3PlateStiffness(x, y, D, nu);
-    const Fe = computeT3PlateLoad(x, y, p);
+    // Element area
+    const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
     
-    // Assemble into global
+    // Centroid for checking if in cutout
+    const xc = (x[0] + x[1] + x[2]) / 3;
+    const yc = (y[0] + y[1] + y[2]) / 3;
+    const inCutout = isPointInCutout(xc, yc);
+    
+    // Total pressure on this element (global + patch + self-weight)
+    let pTotal = pPatch;  // patch pressure (if patch)
+    
+    if (!inCutout) {
+      // Add global pressure
+      pTotal += model.shape.globalPressure;
+      
+      // Add self-weight: pressure = ρ * t * g (assuming g = 1 for unit conversion simplicity)
+      // or user provides weight density as force/volume already
+      pTotal += model.shape.rho * t;
+    }
+    // For cutouts: no pressure, no self-weight
+    
+    const Ke = computeT3PlateStiffness(x, y, D, nu);
+    const Fe = computeT3PlateLoad(x, y, pTotal);
+    
     for (let i = 0; i < 3; i++) {
       for (let j = 0; j < 3; j++) {
         for (let di = 0; di < 3; di++) {
@@ -1334,17 +1372,16 @@ function solvePlateBending(){
     }
   });
   
-  // Apply boundary conditions (penalty method for simplicity)
+  // Apply BCs
   const penalty = 1e12 * Math.max(...K.flat().map(Math.abs));
   fixedDOFs.forEach(dof => {
     K[dof][dof] += penalty;
     F[dof] = 0;
   });
   
-  // Solve K u = F using conjugate gradient
+  // Solve
   const u = solveLinearSystemCG(K, F, nDOF);
   
-  // Extract results
   const w = new Array(nNodes);
   const thetaX = new Array(nNodes);
   const thetaY = new Array(nNodes);
@@ -1355,7 +1392,7 @@ function solvePlateBending(){
     thetaY[i] = u[i * 3 + 2];
   }
   
-  // Compute stresses at element centroids
+  // Compute stresses
   const elementStresses = T.map(tri => {
     const regionId = tri.region;
     const t = regions[regionId].t;
@@ -1372,7 +1409,7 @@ function solvePlateBending(){
     return computeT3Stresses(x, y, w_e, tx_e, ty_e, E, nu, t);
   });
   
-  // Interpolate stresses to nodes (average from adjacent elements)
+  // Interpolate to nodes
   const nodeStresses = new Array(nNodes).fill(null).map(() => ({
     top: {sigmaX: 0, sigmaY: 0, tauXY: 0, count: 0},
     bot: {sigmaX: 0, sigmaY: 0, tauXY: 0, count: 0}
@@ -1392,7 +1429,6 @@ function solvePlateBending(){
     });
   });
   
-  // Average
   nodeStresses.forEach(ns => {
     if (ns.top.count > 0) {
       ns.top.sigmaX /= ns.top.count;
@@ -1406,7 +1442,7 @@ function solvePlateBending(){
     }
   });
   
-  // Compute principal stresses and von Mises at nodes
+  // Principal stresses and von Mises
   nodeStresses.forEach(ns => {
     ['top', 'bot'].forEach(surface => {
       const sx = ns[surface].sigmaX;
@@ -1437,7 +1473,6 @@ function solvePlateBending(){
 }
 
 function identifyBoundaryNodes(){
-  // Map boundary IDs to node indices
   const boundaryNodes = {};
   
   if (!mesh) return boundaryNodes;
@@ -1445,8 +1480,7 @@ function identifyBoundaryNodes(){
   const V = mesh.V;
   const loops = mesh.loops;
   
-  // Helper to find nodes near a loop
-  const findNodesNearLoop = (loop, tolerance = 0.001) => {
+  const findNodesNearLoop = (loop, tolerance = 0.01) => {
     const nodes = new Set();
     loop.forEach(pt => {
       V.forEach((v, idx) => {
@@ -1458,9 +1492,7 @@ function identifyBoundaryNodes(){
     return Array.from(nodes);
   };
   
-  // Outer boundary
   if (model.shape.type === "rect") {
-    // 4 edges
     const W = model.shape.W, L = model.shape.L;
     const tolerance = 0.01;
     
@@ -1472,7 +1504,6 @@ function identifyBoundaryNodes(){
     boundaryNodes["outer:perimeter"] = findNodesNearLoop(loops.outer, 0.01);
   }
   
-  // Cutouts
   loops.cutouts.forEach(c => {
     boundaryNodes[c.id] = findNodesNearLoop(c.loop, 0.01);
   });
@@ -1481,29 +1512,20 @@ function identifyBoundaryNodes(){
 }
 
 function computeT3PlateStiffness(x, y, D, nu){
-  // Simplified T3 plate element (constant curvature)
-  // Returns 9x9 stiffness matrix (3 nodes × 3 DOFs each)
-  
-  // Area
   const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
   
-  // Shape function derivatives (constant for T3)
   const b = [y[1]-y[2], y[2]-y[0], y[0]-y[1]];
   const c = [x[2]-x[1], x[0]-x[2], x[1]-x[0]];
   
-  // Plate bending stiffness matrix (simplified)
   const Ke = new Array(9).fill(0).map(() => new Array(9).fill(0));
   
-  // Use a simple constant curvature approximation
   const factor = D * A / 12;
   
   for (let i = 0; i < 3; i++) {
     for (let j = 0; j < 3; j++) {
-      // Bending terms (w DOF: index i*3+0)
       const k_bend = factor * (b[i]*b[j]/(A*A) + c[i]*c[j]/(A*A));
       Ke[i*3+0][j*3+0] += k_bend;
       
-      // Coupling with rotations (simplified)
       Ke[i*3+0][j*3+1] += 0.1 * k_bend * b[i]/(2*A);
       Ke[i*3+0][j*3+2] += 0.1 * k_bend * c[i]/(2*A);
       Ke[i*3+1][j*3+0] += 0.1 * k_bend * b[j]/(2*A);
@@ -1515,30 +1537,22 @@ function computeT3PlateStiffness(x, y, D, nu){
 }
 
 function computeT3PlateLoad(x, y, p){
-  // Uniform pressure load on element
-  // Returns 9×1 load vector
-  
   const A = 0.5 * Math.abs((x[1]-x[0])*(y[2]-y[0]) - (x[2]-x[0])*(y[1]-y[0]));
   
   const Fe = new Array(9).fill(0);
   
-  // Distribute load to w DOFs equally
   const loadPerNode = p * A / 3;
-  Fe[0] = loadPerNode;  // node 0, w DOF
-  Fe[3] = loadPerNode;  // node 1, w DOF
-  Fe[6] = loadPerNode;  // node 2, w DOF
+  Fe[0] = loadPerNode;
+  Fe[3] = loadPerNode;
+  Fe[6] = loadPerNode;
   
   return Fe;
 }
 
 function computeT3Stresses(x, y, w, thetaX, thetaY, E, nu, t){
-  // Compute stresses at top and bottom surfaces
-  // Based on plate theory: sigma = -E*z/(1-nu^2) * curvature
-  
-  // Curvature (approximate from nodal values)
   const kx = (thetaY[1] - thetaY[0]) / (x[1] - x[0] + 1e-12);
   const ky = (thetaX[2] - thetaX[0]) / (y[2] - y[0] + 1e-12);
-  const kxy = 0; // Simplified
+  const kxy = 0;
   
   const z_top = t / 2;
   const z_bot = -t / 2;
@@ -1559,7 +1573,6 @@ function computeT3Stresses(x, y, w, thetaX, thetaY, E, nu, t){
 }
 
 function solveLinearSystemCG(A, b, n, maxIter=5000, tol=1e-6){
-  // Conjugate Gradient solver for symmetric positive definite systems
   const x = new Array(n).fill(0);
   const r = b.map((bi, i) => bi - dotRow(A[i], x));
   let p = [...r];
@@ -1668,7 +1681,6 @@ function renderDeflection(w, scale){
   const T = mesh.T;
   const regions = mesh.regions;
   
-  // Get animation factor
   let animFactor = 1.0;
   if (animationEnabled) {
     const amp = Number(animAmp.value);
@@ -1680,10 +1692,8 @@ function renderDeflection(w, scale){
   const maxW = Math.max(...w);
   const range = maxW - minW || 1;
   
-  // Color map function
   const getColor = (val) => {
     const t = (val - minW) / range;
-    // Rainbow: blue -> cyan -> green -> yellow -> red
     if (t < 0.25) {
       const s = t / 0.25;
       return new THREE.Color(0, s, 1);
@@ -1699,7 +1709,6 @@ function renderDeflection(w, scale){
     }
   };
   
-  // Build geometry with deflection
   T.forEach(tri => {
     const regionId = tri.region;
     const tElem = regions[regionId].t;
@@ -1719,7 +1728,6 @@ function renderDeflection(w, scale){
       colors.push(col.r, col.g, col.b);
     });
     
-    // Build prism faces
     const geom = new THREE.BufferGeometry();
     const positions = new Float32Array([
       ...pos.slice(0,6),
@@ -1728,9 +1736,9 @@ function renderDeflection(w, scale){
     ]);
     
     const indices = [
-      3,4,5, // top
-      2,1,0, // bottom
-      0,1,4, 0,4,3, // sides
+      3,4,5,
+      2,1,0,
+      0,1,4, 0,4,3,
       1,2,5, 1,5,4,
       2,0,3, 2,3,5
     ];
@@ -1759,12 +1767,10 @@ function renderStress(mode, stresses, defScale){
   const regions = mesh.regions;
   const w = solution.deflection;
   
-  // Parse mode: stress_{surface}_{type}
   const parts = mode.split('_');
-  const surface = parts[1]; // 'top' or 'bot'
-  const stressType = parts[2]; // 'vm', 'p1', 'p2'
+  const surface = parts[1];
+  const stressType = parts[2];
   
-  // Extract stress values
   const vals = stresses.map(ns => {
     const s = ns[surface];
     if (stressType === 'vm') return s.vonMises;
@@ -1780,7 +1786,6 @@ function renderStress(mode, stresses, defScale){
   contourMin.textContent = fmt(minS);
   contourMax.textContent = fmt(maxS);
   
-  // Get animation factor
   let animFactor = 1.0;
   if (animationEnabled) {
     const amp = Number(animAmp.value);
@@ -1805,7 +1810,6 @@ function renderStress(mode, stresses, defScale){
     }
   };
   
-  // Build geometry showing stress on appropriate surface
   T.forEach(tri => {
     const regionId = tri.region;
     const tElem = regions[regionId].t;
@@ -2008,6 +2012,7 @@ function addTubeForPolyline(boundaryId, boundaryLabel, loop, y, radius, color){
 }
 
 function addPressureArrows(meshObj){
+  // Show arrows for loaded elements (global + self-weight + patch pressure)
   const V = meshObj.V;
   const T = meshObj.T;
   const regions = meshObj.regions;
@@ -2015,23 +2020,35 @@ function addPressureArrows(meshObj){
   const span = spanVal();
   const baseLen = Math.max(0.05*span, 0.8*model.shape.h);
 
-  const k = 25;
+  const k = 25;  // show one arrow per k triangles
 
   let count = 0;
   T.forEach((tri, idx)=>{
-    if (tri.region === "base") return;
-    const p = regions[tri.region].p;
-    if (!isFinite(p) || Math.abs(p) < 1e-12) return;
     if ((idx % k) !== 0) return;
+    
+    const regionId = tri.region;
+    const nodes = [tri.i1, tri.i2, tri.i3];
+    const x = nodes.map(i => V[i].x);
+    const y = nodes.map(i => V[i].y);
+    
+    const xc = (x[0]+x[1]+x[2])/3;
+    const yc = (y[0]+y[1]+y[2])/3;
+    
+    const inCutout = isPointInCutout(xc, yc);
+    
+    // Total pressure
+    let pTotal = regions[regionId].p;  // patch pressure
+    if (!inCutout) {
+      pTotal += model.shape.globalPressure;
+      pTotal += model.shape.rho * regions[regionId].t;
+    }
+    
+    if (Math.abs(pTotal) < 1e-12) return;
 
-    const a=V[tri.i1], b=V[tri.i2], c=V[tri.i3];
-    const xc = (a.x+b.x+c.x)/3;
-    const zc = (a.y+b.y+c.y)/3;
+    const tElem = regions[regionId].t;
+    const origin = new THREE.Vector3(xc, tElem + 0.02, yc);
 
-    const tElem = regions[tri.region].t;
-    const origin = new THREE.Vector3(xc, tElem + 0.02, zc);
-
-    const mag = Math.min(3.0, Math.max(0.6, Math.log10(1 + Math.abs(p)) + 0.6));
+    const mag = Math.min(3.0, Math.max(0.6, Math.log10(1 + Math.abs(pTotal)) + 0.6));
     const len = baseLen * mag;
 
     const arrow = new THREE.ArrowHelper(new THREE.Vector3(0,-1,0), origin, len, 0xf59e0b, 0.25*len, 0.15*len);
@@ -2100,7 +2117,7 @@ function animate(){
   controls.update();
   
   if (animationEnabled) {
-    animationTime += 0.016; // ~60fps
+    animationTime += 0.016;
     updateVisualization();
   }
   
