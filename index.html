@@ -1299,6 +1299,10 @@ function solvePlateBending(){
   const nNodes = V.length;
   const nDOF = nNodes * 3;
   
+  // Identify boundary nodes
+  const boundaryNodes = identifyBoundaryNodes();
+  const fixedDOFs = new Set();
+  
   // Apply BCs
   Object.entries(model.bcs).forEach(([boundaryId, bcType]) => {
     const nodes = boundaryNodes[boundaryId] || [];
